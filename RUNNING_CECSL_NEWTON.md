@@ -315,6 +315,46 @@ Each run writes a JSONL access trace under:
 
 The trace records retrieval events and eviction events, including selected memory frames, FOV-overlap confidence, retained memory size, and policy-specific eviction scores where available.
 
+For paper-style grids matching the MemCam setup, use 30 videos, durations 10/20/30/60 seconds, and budgets 32/64 for budgeted policies:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=30 \
+DURATIONS=10,20,30,60 \
+POLICIES=unbounded,fifo,rarity_irreplaceability,slam_covisibility \
+BUDGETS=32,64 \
+bash scripts/run_worldmem_memory_policy_grid.sh
+```
+
+The duration is the generated future horizon at 10 FPS:
+
+```text
+10s -> 100 generated frames, N_FRAMES_VALID=700 with CONTEXT_FRAMES=600
+20s -> 200 generated frames, N_FRAMES_VALID=800
+30s -> 300 generated frames, N_FRAMES_VALID=900
+60s -> 600 generated frames, N_FRAMES_VALID=1200
+```
+
+This full grid is large: 4 durations x 1 unbounded + 4 durations x 3 policies x 2 budgets = 28 runs, each over 30 videos. On CECSL, start with a small subset before launching the full grid:
+
+```bash
+NUM_VIDEOS=2 DURATIONS=10 POLICIES=unbounded,fifo BUDGETS=32 \
+bash scripts/run_worldmem_memory_policy_grid.sh
+```
+
+Newton Slurm array for the full 28-run grid:
+
+```bash
+WORLDMEM_DATA_DIR=/path/on/newton/minecraft \
+WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results \
+NUM_VIDEOS=30 \
+sbatch slurm/newton_worldmem_memory_policy_grid.sbatch
+```
+
 ## Training
 
 The paper README says training used 4 H100 GPUs and converged around 500K steps. On a single CECSL A6000 Pro, start with smaller smoke settings before committing to a long run:

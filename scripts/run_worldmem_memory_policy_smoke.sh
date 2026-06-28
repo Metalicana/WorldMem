@@ -15,12 +15,19 @@ fi
 
 MEMORY_POLICY="${MEMORY_POLICY:-unbounded}"
 MEMORY_BUDGET="${MEMORY_BUDGET:-}"
-LIMIT_BATCH="${LIMIT_BATCH:-1}"
-N_FRAMES_VALID="${N_FRAMES_VALID:-700}"
+LIMIT_BATCH="${LIMIT_BATCH:-${NUM_VIDEOS:-1}}"
+FPS="${FPS:-10}"
+FUTURE_SECONDS="${FUTURE_SECONDS:-}"
 CONTEXT_FRAMES="${CONTEXT_FRAMES:-600}"
+if [ -n "$FUTURE_SECONDS" ]; then
+  N_FRAMES_VALID="${N_FRAMES_VALID:-$((CONTEXT_FRAMES + FUTURE_SECONDS * FPS))}"
+else
+  N_FRAMES_VALID="${N_FRAMES_VALID:-700}"
+fi
 SAMPLING_TIMESTEPS="${SAMPLING_TIMESTEPS:-20}"
 DATA_DIR="${WORLDMEM_DATA_DIR:-data/minecraft}"
-RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGET}}_smoke}"
+RUN_NAME_SUFFIX="${RUN_NAME_SUFFIX:-${FUTURE_SECONDS:+_${FUTURE_SECONDS}s}_n${LIMIT_BATCH}}"
+RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGET}}${RUN_NAME_SUFFIX}}"
 OUTPUT_DIR="${OUTPUT_DIR:-$STORAGE_ROOT/outputs/memory_policy/$RUN_NAME}"
 TRACE_PATH="${TRACE_PATH:-$OUTPUT_DIR/access_traces/$RUN_NAME.jsonl}"
 
@@ -77,7 +84,18 @@ echo "Storage root: $STORAGE_ROOT"
 echo "Data dir: $DATA_DIR"
 echo "Memory policy: $MEMORY_POLICY"
 echo "Memory budget: ${MEMORY_BUDGET:-none}"
+echo "Future seconds: ${FUTURE_SECONDS:-derived-from-N_FRAMES_VALID}"
+echo "Context frames: $CONTEXT_FRAMES"
+echo "N frames valid: $N_FRAMES_VALID"
+echo "Limit batch/videos: $LIMIT_BATCH"
 echo "Output dir: $OUTPUT_DIR"
 echo "Trace path: $TRACE_PATH"
+
+if [ "${DRY_RUN:-0}" = "1" ]; then
+  printf 'Command:'
+  printf ' %q' "${cmd[@]}"
+  printf '\n'
+  exit 0
+fi
 
 "${cmd[@]}"

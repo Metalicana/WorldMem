@@ -7,7 +7,7 @@ Adapted from https://github.com/etched-ai/open-oasis/blob/master/utils.py
 import math
 import torch
 from torch import nn
-from torchvision.io import read_image, read_video
+from torchvision.io import read_image
 from torchvision.transforms.functional import resize
 from einops import rearrange
 from typing import Mapping, Sequence
@@ -127,6 +127,32 @@ IMAGE_EXTENSIONS = {"png", "jpg", "jpeg"}
 VIDEO_EXTENSIONS = {"mp4"}
 
 
+def _read_video(path):
+    try:
+        from torchvision.io import read_video
+
+        video = read_video(path, pts_unit="sec")[0]
+    except ImportError:
+        import cv2
+
+        capture = cv2.VideoCapture(path)
+        frames = []
+        while capture.isOpened():
+            ok, frame = capture.read()
+            if not ok:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(torch.from_numpy(frame))
+        capture.release()
+        if not frames:
+            raise ValueError(f"could not read video prompt: {path}")
+        video = torch.stack(frames, dim=0)
+
+    if video.ndim == 4 and video.shape[-1] in (1, 3, 4):
+        video = rearrange(video[..., :3], "t h w c -> t c h w")
+    return video
+
+
 def load_prompt(path, video_offset=None, n_prompt_frames=1):
     if path.lower().split(".")[-1] in IMAGE_EXTENSIONS:
         print("prompt is image; ignoring video_offset and n_prompt_frames")
@@ -134,7 +160,7 @@ def load_prompt(path, video_offset=None, n_prompt_frames=1):
         # add frame dimension
         prompt = rearrange(prompt, "c h w -> 1 c h w")
     elif path.lower().split(".")[-1] in VIDEO_EXTENSIONS:
-        prompt = read_video(path, pts_unit="sec")[0]
+        prompt = _read_video(path)
         if video_offset is not None:
             prompt = prompt[video_offset:]
         prompt = prompt[:n_prompt_frames]

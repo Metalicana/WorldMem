@@ -17,10 +17,25 @@ Start from a clean shell on the CECSL PC:
 cd /path/to/WorldMem
 
 nvidia-smi
-conda create -y -n worldmem python=3.10
+conda create -y -n worldmem python=3.10 pip
 conda activate worldmem
 python -m pip install --upgrade pip setuptools wheel
 conda install -y -c conda-forge ffmpeg=4.3.2
+```
+
+If the environment already exists and `python -m pip` says `No module named pip`, repair it from inside the active env:
+
+```bash
+conda activate worldmem
+conda install -y pip setuptools wheel
+python -m pip install --upgrade pip setuptools wheel
+```
+
+If `conda install pip` is not available on that machine for some reason, try the Python bootstrap:
+
+```bash
+python -m ensurepip --upgrade
+python -m pip install --upgrade pip setuptools wheel
 ```
 
 Set CECSL storage and cache locations before installing or downloading large files:
@@ -80,6 +95,8 @@ On CECSL, because `data/minecraft` is symlinked, the real data should be:
   test/
 ```
 
+On CECSL, a completed download has been observed at about `421G` with all three split directories present. Exact size can vary slightly with cache and partial files, but a much smaller directory, missing `validation`, or remaining `.lock`/`.incomplete` files means the download is not fully clean yet.
+
 Download the released Minecraft dataset into the CECSL data directory. One practical route is the Hugging Face CLI:
 
 ```bash
@@ -90,6 +107,70 @@ hf download zeqixiao/worldmem_minecraft_dataset \
 ```
 
 After download, confirm that each split contains `.mp4` files and matching `.npz` files. The loader looks for videos under each split and then opens the same path with a `.npz` suffix for actions and poses.
+
+To check whether an interrupted download is actually complete:
+
+```bash
+cd /data/ab575577/worldmem/data/minecraft
+
+du -sh .
+find training -type f -name '*.mp4' | wc -l
+find training -type f -name '*.npz' | wc -l
+find validation -type f -name '*.mp4' | wc -l
+find validation -type f -name '*.npz' | wc -l
+find test -type f -name '*.mp4' | wc -l
+find test -type f -name '*.npz' | wc -l
+find .cache/huggingface/download \( -name '*.lock' -o -name '*.incomplete' \) -print | head
+```
+
+If the download was interrupted, first make sure no old downloader is still running, remove stale `.lock` files only, and then resume with one `hf download` process:
+
+```bash
+pgrep -af 'hf download|huggingface-cli|snapshot_download|huggingface_hub'
+kill <PID>                # only for old download PIDs that are still running
+kill -9 <PID>             # only if the old PID refuses to stop
+
+find /data/ab575577/worldmem/data/minecraft/.cache/huggingface/download \
+  -name '*.lock' -type f -delete
+
+hf download zeqixiao/worldmem_minecraft_dataset \
+  --repo-type dataset \
+  --local-dir /data/ab575577/worldmem/data/minecraft
+```
+
+Keep `.incomplete` files when resuming; they are partial download files that the Hugging Face client may be able to continue from.
+
+For a long CECSL resume, run the downloader inside tmux with a log and a smaller worker count so it is easier to monitor and less likely to create many competing locks:
+
+```bash
+tmux new -s worldmem_dl
+conda activate worldmem
+
+export WORLDMEM_ROOT=/data/ab575577/worldmem
+export HF_HOME=$WORLDMEM_ROOT/hf_cache
+export TMPDIR=$WORLDMEM_ROOT/tmp
+mkdir -p "$HF_HOME" "$TMPDIR" "$WORLDMEM_ROOT/logs"
+
+hf download zeqixiao/worldmem_minecraft_dataset \
+  --repo-type dataset \
+  --local-dir /data/ab575577/worldmem/data/minecraft \
+  --max-workers 4 \
+  2>&1 | tee "$WORLDMEM_ROOT/logs/hf_dataset_download_$(date +%F_%H%M).log"
+```
+
+Detach from tmux with `Ctrl-b`, then `d`. Reattach with `tmux attach -t worldmem_dl`.
+
+If the restarted command immediately prints `Still waiting to acquire lock`, stop it with `Ctrl-C`, confirm no downloader remains, delete the lock files again, and verify the lock count is zero before restarting:
+
+```bash
+pgrep -af 'hf download|huggingface-cli|snapshot_download|huggingface_hub'
+find /data/ab575577/worldmem/data/minecraft/.cache/huggingface/download \
+  -name '*.lock' -type f -delete
+find /data/ab575577/worldmem/data/minecraft/.cache/huggingface/download \
+  -name '*.lock' -type f | wc -l
+```
+
+If the count is still nonzero, inspect one stuck lock with `ls -l <lock-file>` and remove the specific file with `rm -f <lock-file>` after confirming no Hugging Face downloader is running.
 
 ## Weights and Caches
 
@@ -232,6 +313,8 @@ If you add a Hydra cluster config later, `main.py` will detect `cluster=...` and
 - `ModuleNotFoundError`: reactivate `conda activate worldmem`, then reinstall missing packages.
 - `pyrealsense2` install failure: it is listed in `requirements.txt`, but the inspected train/infer/eval paths do not import it. If it blocks setup, install the remaining requirements and revisit only if data generation needs it.
 - CUDA architecture errors: reinstall a newer PyTorch CUDA wheel, especially on the CECSL A6000 Pro/newer GPU.
+- `ImportError: cannot import name 'read_video' from 'torchvision.io'`: newer `torchvision` versions removed the eager `read_video` import. This repo has been patched to lazily import `read_video` and fall back to OpenCV in `algorithms/worldmem/models/utils.py`.
 - Home directory fills up: re-check `HF_HOME`, `WANDB_DIR`, `WANDB_CACHE_DIR`, `TMPDIR`, and `+output_dir`.
 - Dataset has zero samples: check that `training`, `validation`, and `test` contain `.mp4` files, and that every video has a matching `.npz` action/pose file.
 - W&B entity error: pass `wandb.entity=local` for offline tests or set your real W&B entity for online logging.
+- Interrupted Hugging Face download keeps waiting on `.lock` files: find the old downloader with `pgrep -af 'hf download|huggingface-cli|snapshot_download|huggingface_hub'`, stop it with `kill <PID>`, then use `kill -9 <PID>` only if it ignores the first kill. After no downloader remains, remove stale lock files with `find /data/ab575577/worldmem/data/minecraft/.cache/huggingface/download -name '*.lock' -type f -delete`.

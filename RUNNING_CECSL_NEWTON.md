@@ -250,6 +250,69 @@ sh infer.sh
 
 If you want inference outputs under `/data/ab575577/`, run the equivalent `python -m main ... +output_dir=$WORLDMEM_ROOT/outputs/manual/infer_smoke` command instead of the shell script, or edit the script locally.
 
+## Memory Policy Smoke Runs
+
+WorldMem now has a MemCam-style fixed-budget memory test hook for evaluation/test generation. The default behavior is still unbounded memory. Budgeted policies first retain a bounded memory bank, then WorldMem's original FOV-overlap retrieval selects reference frames from that retained bank.
+
+Supported policies:
+
+```text
+unbounded
+fifo
+rarity_irreplaceability
+slam_covisibility
+```
+
+On CECSL, run from `~/WorldMem`:
+
+```bash
+conda activate worldmem
+
+MEMORY_POLICY=fifo \
+MEMORY_BUDGET=32 \
+bash scripts/run_worldmem_memory_policy_smoke.sh
+```
+
+RI:
+
+```bash
+MEMORY_POLICY=rarity_irreplaceability \
+MEMORY_BUDGET=32 \
+bash scripts/run_worldmem_memory_policy_smoke.sh
+```
+
+SLAM-style covisibility:
+
+```bash
+MEMORY_POLICY=slam_covisibility \
+MEMORY_BUDGET=32 \
+bash scripts/run_worldmem_memory_policy_smoke.sh
+```
+
+The script uses `/data/ab575577/worldmem` automatically on CECSL. On Newton, it does not assume that path; set the data and output roots explicitly if needed:
+
+```bash
+WORLDMEM_DATA_DIR=/path/on/newton/minecraft \
+WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results \
+MEMORY_POLICY=fifo \
+MEMORY_BUDGET=32 \
+bash scripts/run_worldmem_memory_policy_smoke.sh
+```
+
+Newton Slurm wrapper:
+
+```bash
+MEMORY_POLICY=fifo MEMORY_BUDGET=32 sbatch slurm/newton_worldmem_memory_policy_smoke.sbatch
+```
+
+Each run writes a JSONL access trace under:
+
+```text
+<output_dir>/access_traces/<run_name>.jsonl
+```
+
+The trace records retrieval events and eviction events, including selected memory frames, FOV-overlap confidence, retained memory size, and policy-specific eviction scores where available.
+
 ## Training
 
 The paper README says training used 4 H100 GPUs and converged around 500K steps. On a single CECSL A6000 Pro, start with smaller smoke settings before committing to a long run:

@@ -1,6 +1,7 @@
 import os
 import random
 import math
+import json
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -20,6 +21,12 @@ from .df_base import DiffusionForcingBase
 from .models.vae import VAE_models
 from .models.diffusion import Diffusion
 from .models.pose_prediction import PosePredictionNet
+from .memory_policies import (
+    BUDGETED_MEMORY_POLICIES,
+    FrameMemoryBuffer,
+    compute_rarity_irreplaceability_scores,
+    compute_slam_covisibility_scores,
+)
 import glob
 
 # Utility Functions
@@ -355,6 +362,13 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.lpips_batch_size = getattr(cfg, "lpips_batch_size", 16)
         self.next_frame_length = getattr(cfg, "next_frame_length", 1)
         self.require_pose_prediction = getattr(cfg, "require_pose_prediction", False)
+        self.memory_policy = getattr(cfg, "memory_policy", "unbounded")
+        self.memory_budget = getattr(cfg, "memory_budget", None)
+        self.access_trace_path = getattr(cfg, "access_trace_path", None)
+        if self.memory_policy in BUDGETED_MEMORY_POLICIES and self.memory_budget is None:
+            raise ValueError(f"{self.memory_policy} memory policy requires +algorithm.memory_budget=<int>")
+        self._access_trace_handle = None
+        self._last_retrieval_trace = []
 
         super().__init__(cfg)
             
@@ -574,19 +588,237 @@ class WorldMemMinecraft(DiffusionForcingBase):
         x = rearrange(x, "(t b) c h w-> t b c h w", t=total_frames)
         return x
 
-    def _generate_condition_indices(self, curr_frame, memory_condition_length, xs_pred, pose_conditions, frame_idx, horizon):
+    def _open_access_trace(self):
+        if not self.access_trace_path or self._access_trace_handle is not None:
+            return
+        trace_dir = os.path.dirname(self.access_trace_path)
+        if trace_dir:
+            os.makedirs(trace_dir, exist_ok=True)
+        self._access_trace_handle = open(self.access_trace_path, "w", encoding="utf-8")
+
+    def _close_access_trace(self):
+        if self._access_trace_handle is None:
+            return
+        self._access_trace_handle.close()
+        self._access_trace_handle = None
+
+    def _write_access_trace(self, payload):
+        if self._access_trace_handle is None:
+            return
+        payload = {
+            "memory_policy": self.memory_policy,
+            "memory_budget": self.memory_budget,
+            **payload,
+        }
+        self._access_trace_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self._access_trace_handle.flush()
+
+    def _pinned_memory_frames(self):
+        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
+            return {0}
+        return set()
+
+    def _latent_feature_dict(self, xs_pred, frame_indices, batch_index):
+        features = {}
+        valid_indices = [int(idx) for idx in frame_indices if 0 <= int(idx) < xs_pred.shape[0]]
+        if not valid_indices:
+            return features
+
+        latents = xs_pred[valid_indices, batch_index].detach().float().cpu()
+        pooled = F.adaptive_avg_pool2d(latents, (4, 4)).flatten(1).numpy()
+        for offset, frame_idx in enumerate(valid_indices):
+            features[frame_idx] = pooled[offset]
+        return features
+
+    def _compute_memory_scores(self, frame_indices, c2w_mat, xs_pred, batch_index):
+        frame_indices = sorted({int(idx) for idx in frame_indices if 0 <= int(idx) < xs_pred.shape[0]})
+        if self.memory_policy in {"unbounded", "fifo"} or not frame_indices:
+            return None, {}
+
+        latent_features = self._latent_feature_dict(xs_pred, frame_indices, batch_index)
+        pinned_frames = self._pinned_memory_frames()
+
+        if self.memory_policy == "rarity_irreplaceability":
+            return compute_rarity_irreplaceability_scores(
+                memory_frame_indices=frame_indices,
+                latent_features=latent_features,
+                pinned_frames=pinned_frames,
+                return_details=True,
+            )
+
+        if self.memory_policy == "slam_covisibility":
+            c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
+            return compute_slam_covisibility_scores(
+                memory_frame_indices=frame_indices,
+                c2ws=c2ws,
+                pinned_frames=pinned_frames,
+                latent_features=latent_features,
+                return_details=True,
+            )
+
+        return None, {}
+
+    def _build_memory_buffers(self, n_context_frames, batch_size, c2w_mat, xs_pred):
+        if self.memory_policy == "unbounded":
+            return None
+
+        memory_buffers = []
+        initial_frames = list(range(n_context_frames))
+        protected_frames = {max(n_context_frames - 1, 0)}
+        for batch_index in range(batch_size):
+            buffer = FrameMemoryBuffer(
+                policy=self.memory_policy,
+                budget=self.memory_budget,
+                pinned_frames=self._pinned_memory_frames(),
+            )
+            scores, _ = self._compute_memory_scores(
+                initial_frames,
+                c2w_mat,
+                xs_pred,
+                batch_index,
+            )
+            evicted = buffer.update(
+                initial_frames,
+                eviction_scores=scores,
+                protected_frames=protected_frames,
+            )
+            for evicted_frame in evicted:
+                self._write_access_trace(
+                    {
+                        "event": "memory_eviction",
+                        "phase": "initial_context",
+                        "batch_index": batch_index,
+                        "evicted_memory_frame": int(evicted_frame),
+                        "stored_memory_size": len(buffer),
+                    }
+                )
+            memory_buffers.append(buffer)
+        return memory_buffers
+
+    def _memory_candidate_lists(self, memory_buffers, batch_size):
+        if memory_buffers is None:
+            return None
+        return [memory_buffers[batch_index].candidates() for batch_index in range(batch_size)]
+
+    def _record_retrieval_trace(self, memory_buffers):
+        for record in self._last_retrieval_trace:
+            batch_index = record.get("batch_index", 0)
+            selected_frame = record.get("selected_memory_frame")
+            selected_overlap = record.get("selected_overlap")
+            if memory_buffers is not None and selected_frame is not None:
+                memory_buffers[batch_index].record_selection(selected_frame, selected_overlap)
+                record["selected_count_after"] = memory_buffers[batch_index].selected_count(selected_frame)
+            self._write_access_trace(record)
+
+    def _update_memory_buffers(self, memory_buffers, curr_frame, horizon, c2w_mat, xs_pred):
+        if memory_buffers is None:
+            return
+
+        new_frames = list(range(curr_frame, curr_frame + horizon))
+        protected_frames = {curr_frame + horizon - 1}
+        for batch_index, buffer in enumerate(memory_buffers):
+            current_memory = buffer.candidates()
+            prospective_memory = current_memory + [
+                frame_idx for frame_idx in new_frames if frame_idx not in current_memory
+            ]
+            scores, score_details = self._compute_memory_scores(
+                prospective_memory,
+                c2w_mat,
+                xs_pred,
+                batch_index,
+            )
+            evicted = buffer.update(
+                new_frames,
+                eviction_scores=scores,
+                protected_frames=protected_frames,
+            )
+            for evicted_frame in evicted:
+                detail = score_details.get(evicted_frame, {})
+                self._write_access_trace(
+                    {
+                        "event": "memory_eviction",
+                        "phase": "generation",
+                        "batch_index": batch_index,
+                        "evicted_memory_frame": int(evicted_frame),
+                        "section_end_frame": int(curr_frame + horizon - 1),
+                        "memory_age_at_eviction": int(curr_frame + horizon - 1 - evicted_frame),
+                        "stored_memory_size": len(buffer),
+                        "eviction_score": detail.get("score"),
+                        "eviction_rarity": detail.get("rarity"),
+                        "eviction_irreplaceability": detail.get("irreplaceability"),
+                        "eviction_cluster_id": detail.get("cluster_id"),
+                        "eviction_cluster_size": detail.get("cluster_size"),
+                        "eviction_cluster_threshold": detail.get("cluster_threshold"),
+                        "eviction_nearest_frame": detail.get("nearest_frame"),
+                        "eviction_nearest_distance": detail.get("nearest_distance"),
+                        "eviction_redundancy_ratio": detail.get("redundancy_ratio"),
+                        "eviction_covisible_observers": detail.get("covisible_observers"),
+                        "eviction_max_covisibility": detail.get("max_covisibility"),
+                        "eviction_nearest_covisible_frame": detail.get("nearest_covisible_frame"),
+                        "eviction_marginal_contribution": detail.get("marginal_contribution"),
+                        "eviction_unique_bonus": detail.get("unique_bonus"),
+                    }
+                )
+
+    def _generate_condition_indices(
+        self,
+        curr_frame,
+        memory_condition_length,
+        xs_pred,
+        pose_conditions,
+        frame_idx,
+        horizon,
+        candidate_indices=None,
+    ):
         """
         Generate indices for condition similarity based on the current frame and pose conditions.
         """
+        self._last_retrieval_trace = []
+        batch_size = xs_pred.shape[1]
+
+        def valid_candidates_for_batch(batch_index):
+            if candidate_indices is None:
+                candidates = list(range(curr_frame))
+            else:
+                candidates = [
+                    int(idx)
+                    for idx in candidate_indices[batch_index]
+                    if 0 <= int(idx) < curr_frame
+                ]
+            return sorted(set(candidates))
+
         if curr_frame < memory_condition_length:
-            random_idx = [i for i in range(curr_frame)] + [0] * (memory_condition_length - curr_frame)
-            random_idx = np.repeat(np.array(random_idx)[:, None], xs_pred.shape[1], -1)
+            selected_by_batch = []
+            for batch_index in range(batch_size):
+                candidates = valid_candidates_for_batch(batch_index)
+                if not candidates:
+                    candidates = [0]
+                selected = candidates[:memory_condition_length]
+                selected = selected + [selected[0]] * (memory_condition_length - len(selected))
+                selected_by_batch.append(selected)
+                for slot_idx, selected_frame in enumerate(selected):
+                    self._last_retrieval_trace.append(
+                        {
+                            "event": "memory_retrieval",
+                            "batch_index": batch_index,
+                            "target_frame": int(curr_frame),
+                            "target_horizon": int(horizon),
+                            "context_slot": int(slot_idx),
+                            "selected_memory_frame": int(selected_frame),
+                            "candidate_count": len(candidates),
+                            "stored_memory_size": len(candidates),
+                            "selected_overlap": None,
+                            "selected_confidence": None,
+                            "fallback_reason": "warmup",
+                        }
+                    )
+            random_idx = np.asarray(selected_by_batch, dtype=np.int64).T
         else:
             # Generate points in a sphere and filter based on field of view
             num_samples = 10000
             radius = 30
             points = generate_points_in_sphere(num_samples, radius).to(pose_conditions.device)
-            points = points[:, None].repeat(1, pose_conditions.shape[1], 1)
+            points = points[:, None].repeat(1, batch_size, 1)
             points += pose_conditions[curr_frame, :, :3][None]
             fov_half_h = torch.tensor(105 / 2, device=pose_conditions.device)
             fov_half_v = torch.tensor(75 / 2, device=pose_conditions.device)
@@ -610,19 +842,55 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 for pc in pose_conditions[:curr_frame]
             ])
 
+            candidate_mask = torch.zeros((curr_frame, batch_size), dtype=torch.bool, device=pose_conditions.device)
+            candidate_counts = []
+            candidate_fallbacks = []
+            for batch_index in range(batch_size):
+                candidates = valid_candidates_for_batch(batch_index)
+                if not candidates:
+                    candidates = [0]
+                candidate_counts.append(len(candidates))
+                candidate_fallbacks.append(candidates[0])
+                candidate_mask[candidates, batch_index] = True
+
             random_idx = []
-            for _ in range(memory_condition_length):
-                overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / in_fov1.sum()
+            for slot_idx in range(memory_condition_length):
+                for batch_index in range(batch_size):
+                    if not candidate_mask[:, batch_index].any():
+                        candidate_mask[candidate_fallbacks[batch_index], batch_index] = True
+
+                denom = in_fov1.sum(0).clamp_min(1)
+                overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / denom
                 
                 confidence = overlap_ratio + (curr_frame - frame_idx[:curr_frame]) / curr_frame * (-0.2)
+                confidence = confidence.masked_fill(~candidate_mask, -1e10)
 
-                if len(random_idx) > 0:
-                    confidence[torch.cat(random_idx)] = -1e10
-                _, r_idx = torch.topk(confidence, k=1, dim=0)
-                random_idx.append(r_idx[0])
+                best_confidence, r_idx = torch.max(confidence, dim=0)
+                random_idx.append(r_idx.cpu())
+                for batch_index in range(batch_size):
+                    selected_frame = int(r_idx[batch_index].item())
+                    selected_overlap = float(overlap_ratio[selected_frame, batch_index].detach().cpu().item())
+                    selected_confidence = float(best_confidence[batch_index].detach().cpu().item())
+                    self._last_retrieval_trace.append(
+                        {
+                            "event": "memory_retrieval",
+                            "batch_index": batch_index,
+                            "target_frame": int(curr_frame),
+                            "target_horizon": int(horizon),
+                            "context_slot": int(slot_idx),
+                            "selected_memory_frame": selected_frame,
+                            "candidate_count": int(candidate_counts[batch_index]),
+                            "stored_memory_size": int(candidate_counts[batch_index]),
+                            "selected_overlap": selected_overlap,
+                            "selected_confidence": selected_confidence,
+                            "fallback_reason": None,
+                        }
+                    )
+                    candidate_mask[selected_frame, batch_index] = False
 
                 # choice 1: directly remove overlapping region
-                occupied_mask = in_fov_list[r_idx[0, range(in_fov1.shape[-1])], :, range(in_fov1.shape[-1])].permute(1,0)
+                batch_arange = torch.arange(batch_size, device=pose_conditions.device)
+                occupied_mask = in_fov_list[r_idx, :, batch_arange].permute(1, 0)
                 in_fov1 = in_fov1 & ~occupied_mask
 
                 # choice 2: apply similarity filter 
@@ -721,6 +989,24 @@ class WorldMemMinecraft(DiffusionForcingBase):
         n_context_frames = self.context_frames // self.frame_stack
         xs_pred = xs[:n_context_frames].clone()
         curr_frame += n_context_frames
+        self._open_access_trace()
+        memory_buffers = self._build_memory_buffers(
+            n_context_frames,
+            batch_size,
+            c2w_mat,
+            xs_pred,
+        )
+        self._write_access_trace(
+            {
+                "event": "memory_run_start",
+                "namespace": namespace,
+                "batch_idx": int(batch_idx),
+                "n_frames": int(n_frames),
+                "context_frames": int(n_context_frames),
+                "memory_condition_length": int(memory_condition_length),
+                "batch_size": int(batch_size),
+            }
+        )
 
         # Progress bar for sampling
         pbar = tqdm(total=n_frames, initial=curr_frame, desc="Sampling")
@@ -742,9 +1028,17 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
             # Handle condition similarity logic
             if memory_condition_length:
+                candidate_indices = self._memory_candidate_lists(memory_buffers, batch_size)
                 random_idx = self._generate_condition_indices(
-                    curr_frame, memory_condition_length, xs_pred, pose_conditions, frame_idx, horizon
+                    curr_frame,
+                    memory_condition_length,
+                    xs_pred,
+                    pose_conditions,
+                    frame_idx,
+                    horizon,
+                    candidate_indices=candidate_indices,
                 )
+                self._record_retrieval_trace(memory_buffers)
 
                 xs_pred = torch.cat([xs_pred, xs_pred[random_idx[:, range(xs_pred.shape[1])], range(xs_pred.shape[1])].clone()], 0)
 
@@ -776,6 +1070,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             if memory_condition_length:
                 xs_pred = xs_pred[:-memory_condition_length]
 
+            self._update_memory_buffers(memory_buffers, curr_frame, horizon, c2w_mat, xs_pred)
             curr_frame += horizon
             pbar.update(horizon)
 
@@ -785,6 +1080,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
         # Store results for evaluation (move to CPU to save GPU memory)
         self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))
+        self._write_access_trace(
+            {
+                "event": "memory_run_end",
+                "namespace": namespace,
+                "batch_idx": int(batch_idx),
+            }
+        )
+        self._close_access_trace()
         return
 
     @torch.no_grad()

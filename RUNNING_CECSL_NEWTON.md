@@ -263,11 +263,12 @@ rarity_irreplaceability
 slam_covisibility
 ```
 
-On CECSL, run from `~/WorldMem`:
+On CECSL, run from `~/WorldMem`. If your shell has `WORLDMEM_ROOT=/data/ab575577/worldmem` from the storage setup, that is fine; the runner uses `WORLDMEM_REPO_ROOT` for the repository path and `WORLDMEM_STORAGE_ROOT` for large outputs.
 
 ```bash
 conda activate worldmem
 
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
 MEMORY_POLICY=fifo \
 MEMORY_BUDGET=32 \
 bash scripts/run_worldmem_memory_policy_smoke.sh
@@ -292,6 +293,7 @@ bash scripts/run_worldmem_memory_policy_smoke.sh
 The script uses `/data/ab575577/worldmem` automatically on CECSL. On Newton, it does not assume that path; set the data and output roots explicitly if needed:
 
 ```bash
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
 WORLDMEM_DATA_DIR=/path/on/newton/minecraft \
 WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results \
 MEMORY_POLICY=fifo \

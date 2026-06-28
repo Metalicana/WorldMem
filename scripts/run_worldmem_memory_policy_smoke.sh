@@ -4,7 +4,9 @@ set -euo pipefail
 GPU="${GPU:-0}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$GPU}"
 
-WORLDMEM_ROOT="${WORLDMEM_ROOT:-$(pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORLDMEM_REPO_ROOT="${WORLDMEM_REPO_ROOT:-$DEFAULT_REPO_ROOT}"
 if [ -d /data/ab575577 ]; then
   STORAGE_ROOT="${WORLDMEM_STORAGE_ROOT:-/data/ab575577/worldmem}"
 else
@@ -27,7 +29,12 @@ if { [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceabil
   exit 2
 fi
 
-cd "$WORLDMEM_ROOT"
+cd "$WORLDMEM_REPO_ROOT"
+if [ ! -f main.py ]; then
+  echo "Could not find main.py in WORLDMEM_REPO_ROOT=$WORLDMEM_REPO_ROOT" >&2
+  echo "Set WORLDMEM_REPO_ROOT to the WorldMem repository path, not the storage path." >&2
+  exit 2
+fi
 mkdir -p "$OUTPUT_DIR" "$(dirname "$TRACE_PATH")" "$STORAGE_ROOT/tmp"
 export TMPDIR="${TMPDIR:-$STORAGE_ROOT/tmp}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
@@ -65,7 +72,7 @@ if [ -n "$MEMORY_BUDGET" ]; then
   cmd+=(+algorithm.memory_budget="$MEMORY_BUDGET")
 fi
 
-echo "WorldMem root: $WORLDMEM_ROOT"
+echo "WorldMem repo root: $WORLDMEM_REPO_ROOT"
 echo "Storage root: $STORAGE_ROOT"
 echo "Data dir: $DATA_DIR"
 echo "Memory policy: $MEMORY_POLICY"

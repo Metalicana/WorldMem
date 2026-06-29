@@ -45,6 +45,7 @@ fi
 mkdir -p "$OUTPUT_DIR" "$(dirname "$TRACE_PATH")" "$STORAGE_ROOT/tmp"
 export TMPDIR="${TMPDIR:-$STORAGE_ROOT/tmp}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
+SAVE_LOCAL_PER_BATCH="${SAVE_LOCAL_PER_BATCH:-true}"
 
 cmd=(
   python -m main +name="$RUN_NAME"
@@ -63,6 +64,7 @@ cmd=(
   +algorithm.lpips_batch_size=16
   +algorithm.log_video=true
   +algorithm.save_local=true
+  +algorithm.save_local_per_batch="$SAVE_LOCAL_PER_BATCH"
   +dataset.customized_validation=true
   +algorithm.n_tokens=8
   algorithm.context_frames="$CONTEXT_FRAMES"
@@ -88,6 +90,7 @@ echo "Future seconds: ${FUTURE_SECONDS:-derived-from-N_FRAMES_VALID}"
 echo "Context frames: $CONTEXT_FRAMES"
 echo "N frames valid: $N_FRAMES_VALID"
 echo "Limit batch/videos: $LIMIT_BATCH"
+echo "Save local per batch: $SAVE_LOCAL_PER_BATCH"
 echo "Output dir: $OUTPUT_DIR"
 echo "Trace path: $TRACE_PATH"
 

@@ -315,6 +315,15 @@ Each run writes a JSONL access trace under:
 
 The trace records retrieval events and eviction events, including selected memory frames, FOV-overlap confidence, retained memory size, and policy-specific eviction scores where available.
 
+Local videos are saved while each batch finishes, not only at the end of a long test run. For a run named `worldmem_unbounded_60s_n30`, inspect:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/worldmem_unbounded_60s_n30/videos/test_vis/pred
+/data/ab575577/worldmem/outputs/memory_policy/worldmem_unbounded_60s_n30/videos/test_vis/gt
+```
+
+The per-batch filenames look like `video_batch00000_0_rank0.mp4`, `video_batch00001_0_rank0.mp4`, and so on. This behavior is enabled by default in `scripts/run_worldmem_memory_policy_smoke.sh` with `SAVE_LOCAL_PER_BATCH=true`.
+
 For paper-style grids matching the MemCam setup, use 30 videos, durations 10/20/30/60 seconds, and budgets 32/64 for budgeted policies:
 
 ```bash

@@ -40,6 +40,7 @@ def log_video(
     format="mp4",
     save_local=True,
     local_save_dir=None,
+    log_wandb=True,
 ):
     """
     take in video tensors in range [-1, 1] and log into wandb
@@ -64,7 +65,7 @@ def log_video(
     # Get local rank for distributed training
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     
-    if not logger:
+    if log_wandb and not logger:
         logger = wandb
     
     # Prepare video tensors
@@ -130,7 +131,7 @@ def log_video(
                 _save_video_to_file(video_gt, str(video_path_gt), fps)
         
         # Log to wandb (only rank 0 to avoid duplicate logging)
-        if local_rank == 0 and logger:
+        if log_wandb and local_rank == 0 and logger:
             # Concatenate pred and gt side by side for visualization
             if observation_gt_np is not None:
                 video_combined = torch.cat([

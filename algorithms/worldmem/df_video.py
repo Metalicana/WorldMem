@@ -358,6 +358,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.focal_length =  getattr(cfg, "focal_length", 0.35)
         self.log_video = cfg.log_video
         self.save_local = getattr(cfg, "save_local", True)
+        self.save_local_per_batch = getattr(cfg, "save_local_per_batch", False)
         self.local_save_dir = getattr(cfg, "local_save_dir", None)
         self.lpips_batch_size = getattr(cfg, "lpips_batch_size", 16)
         self.next_frame_length = getattr(cfg, "next_frame_length", 1)
@@ -505,7 +506,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         else:
             xs = None
 
-        if self.logger and self.log_video:
+        if self.logger and self.log_video and not self.save_local_per_batch:
             log_video(
                 xs_pred,
                 xs,
@@ -1077,6 +1078,20 @@ class WorldMemMinecraft(DiffusionForcingBase):
         # Decode predictions and ground truth
         xs_pred = self.decode(xs_pred[n_context_frames:].to(conditions.device))
         xs_decode = self.decode(xs[n_context_frames:].to(conditions.device))
+
+        if self.save_local and self.save_local_per_batch and self.log_video:
+            log_video(
+                xs_pred.detach(),
+                xs_decode.detach(),
+                step=None,
+                namespace=namespace + "_vis",
+                prefix=f"video_batch{int(batch_idx):05d}",
+                context_frames=self.context_frames,
+                logger=None,
+                save_local=True,
+                local_save_dir=self.local_save_dir,
+                log_wandb=False,
+            )
 
         # Store results for evaluation (move to CPU to save GPU memory)
         self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))

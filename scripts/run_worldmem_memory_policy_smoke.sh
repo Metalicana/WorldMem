@@ -45,11 +45,13 @@ if [ ! -f main.py ]; then
 fi
 mkdir -p "$OUTPUT_DIR" "$(dirname "$TRACE_PATH")" "$STORAGE_ROOT/tmp"
 export TMPDIR="${TMPDIR:-$STORAGE_ROOT/tmp}"
-export WANDB_MODE="${WANDB_MODE:-offline}"
+export WANDB_MODE="${WANDB_MODE:-disabled}"
 SAVE_LOCAL_PER_BATCH="${SAVE_LOCAL_PER_BATCH:-true}"
-STREAM_EVAL_METRICS="${STREAM_EVAL_METRICS:-true}"
+COMPUTE_EVAL_METRICS="${COMPUTE_EVAL_METRICS:-false}"
+STREAM_EVAL_METRICS="${STREAM_EVAL_METRICS:-false}"
 RESUME_PARTIAL="${RESUME_PARTIAL:-1}"
 SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
+RESUME_REQUIRE_METRICS="${RESUME_REQUIRE_METRICS:-false}"
 
 count_completed_batches() {
   local pred_dir="$1"
@@ -76,7 +78,39 @@ count_completed_batches() {
       '
 }
 
-COMPLETED_BATCHES="$(count_completed_batches "$OUTPUT_DIR/videos/test_vis/pred")"
+count_completed_metric_batches() {
+  local trace_path="$1"
+  if [ ! -f "$trace_path" ]; then
+    echo 0
+    return
+  fi
+
+  sed -nE '/"event": "batch_metrics"/ s/.*"global_batch_idx": ([0-9]+).*/\1/p' "$trace_path" \
+    | sort -n \
+    | uniq \
+    | awk '
+        BEGIN { expected = 0 }
+        {
+          idx = $1 + 0
+          if (idx == expected) {
+            expected += 1
+          } else if (idx > expected) {
+            exit
+          }
+        }
+        END { print expected }
+      '
+}
+
+COMPLETED_VIDEO_BATCHES="$(count_completed_batches "$OUTPUT_DIR/videos/test_vis/pred")"
+COMPLETED_BATCHES="$COMPLETED_VIDEO_BATCHES"
+COMPLETED_METRIC_BATCHES="not-required"
+if [ "$RESUME_REQUIRE_METRICS" = "true" ] || [ "$RESUME_REQUIRE_METRICS" = "1" ]; then
+  COMPLETED_METRIC_BATCHES="$(count_completed_metric_batches "$TRACE_PATH")"
+  if [ "$COMPLETED_METRIC_BATCHES" -lt "$COMPLETED_BATCHES" ]; then
+    COMPLETED_BATCHES="$COMPLETED_METRIC_BATCHES"
+  fi
+fi
 DATASET_START_INDEX="${DATASET_START_INDEX:-0}"
 OUTPUT_BATCH_OFFSET="${OUTPUT_BATCH_OFFSET:-0}"
 RESET_TRACE=0
@@ -114,6 +148,7 @@ cmd=(
   +algorithm.log_video=true
   +algorithm.save_local=true
   +algorithm.save_local_per_batch="$SAVE_LOCAL_PER_BATCH"
+  +algorithm.compute_eval_metrics="$COMPUTE_EVAL_METRICS"
   +algorithm.stream_eval_metrics="$STREAM_EVAL_METRICS"
   +algorithm.output_batch_offset="$OUTPUT_BATCH_OFFSET"
   +dataset.customized_validation=true
@@ -121,7 +156,7 @@ cmd=(
   algorithm.context_frames="$CONTEXT_FRAMES"
   experiment.test.batch_size=1
   experiment.test.limit_batch="$LIMIT_BATCH"
-  wandb.mode=offline
+  wandb.mode="$WANDB_MODE"
   wandb.entity=local
   +algorithm.memory_policy="$MEMORY_POLICY"
   +algorithm.access_trace_path="$TRACE_PATH"
@@ -141,12 +176,18 @@ echo "Future seconds: ${FUTURE_SECONDS:-derived-from-N_FRAMES_VALID}"
 echo "Context frames: $CONTEXT_FRAMES"
 echo "N frames valid: $N_FRAMES_VALID"
 echo "Requested batch/videos: $REQUESTED_LIMIT_BATCH"
-echo "Completed batch videos: $COMPLETED_BATCHES"
+echo "Completed batch videos: $COMPLETED_VIDEO_BATCHES"
+if [ "$RESUME_REQUIRE_METRICS" = "true" ] || [ "$RESUME_REQUIRE_METRICS" = "1" ]; then
+  echo "Completed batch metrics: $COMPLETED_METRIC_BATCHES"
+fi
+echo "Resume-complete batch count: $COMPLETED_BATCHES"
 echo "Remaining limit batch/videos: $LIMIT_BATCH"
 echo "Dataset start index: $DATASET_START_INDEX"
 echo "Output batch offset: $OUTPUT_BATCH_OFFSET"
 echo "Save local per batch: $SAVE_LOCAL_PER_BATCH"
+echo "Compute eval metrics: $COMPUTE_EVAL_METRICS"
 echo "Stream eval metrics: $STREAM_EVAL_METRICS"
+echo "Resume requires metrics: $RESUME_REQUIRE_METRICS"
 echo "Output dir: $OUTPUT_DIR"
 echo "Trace path: $TRACE_PATH"
 

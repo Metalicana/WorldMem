@@ -339,7 +339,11 @@ SKIP_COMPLETED=1
 
 Both are enabled by default. To force a clean rerun into the same output directory, use `RESUME_PARTIAL=0 SKIP_COMPLETED=0`, but be aware that this can overwrite existing per-batch videos and trace content.
 
-Long runs also stream metrics per batch by default (`STREAM_EVAL_METRICS=true`) instead of keeping all decoded videos in RAM until epoch end. This reduces memory pressure for `60s_n30` runs.
+Memory-policy sweep runs are video-only by default: W&B is disabled and eval metrics are not computed. This avoids the LPIPS/MSE/PSNR pass and prevents long `60s_n30` runs from holding decoded videos in RAM just to print a metrics table. To opt back into metrics later, set:
+
+```bash
+COMPUTE_EVAL_METRICS=true STREAM_EVAL_METRICS=true WANDB_MODE=offline
+```
 
 For paper-style grids matching the MemCam setup, use 30 videos, durations 10/20/30/60 seconds, and budgets 32/64 for budgeted policies:
 
@@ -445,6 +449,7 @@ If you add a Hydra cluster config later, `main.py` will detect `cluster=...` and
 - `pyrealsense2` install failure: it is listed in `requirements.txt`, but the inspected train/infer/eval paths do not import it. If it blocks setup, install the remaining requirements and revisit only if data generation needs it.
 - CUDA architecture errors: reinstall a newer PyTorch CUDA wheel, especially on the CECSL A6000 Pro/newer GPU.
 - `ImportError: cannot import name 'read_video' from 'torchvision.io'`: newer `torchvision` versions removed the eager `read_video` import. This repo has been patched to lazily import `read_video` and fall back to OpenCV in `algorithms/worldmem/models/utils.py`.
+- `AttributeError: 'float' object has no attribute 'detach'` in `_accumulate_stream_metrics`: LPIPS can return a Python float while MSE/PSNR return tensors. This repo's streaming metric path now handles both, but memory-policy sweeps disable eval metrics by default.
 - Home directory fills up: re-check `HF_HOME`, `WANDB_DIR`, `WANDB_CACHE_DIR`, `TMPDIR`, and `+output_dir`.
 - Dataset has zero samples: check that `training`, `validation`, and `test` contain `.mp4` files, and that every video has a matching `.npz` action/pose file.
 - W&B entity error: pass `wandb.entity=local` for offline tests or set your real W&B entity for online logging.

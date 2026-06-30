@@ -359,6 +359,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.log_video = cfg.log_video
         self.save_local = getattr(cfg, "save_local", True)
         self.save_local_per_batch = getattr(cfg, "save_local_per_batch", False)
+        self.compute_eval_metrics = getattr(cfg, "compute_eval_metrics", True)
         self.stream_eval_metrics = getattr(cfg, "stream_eval_metrics", self.save_local_per_batch)
         self.output_batch_offset = int(getattr(cfg, "output_batch_offset", 0))
         self.local_save_dir = getattr(cfg, "local_save_dir", None)
@@ -396,7 +397,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             ref_mode=self.ref_mode
         )
 
-        self.validation_lpips_model = LearnedPerceptualImagePatchSimilarity()
+        self.validation_lpips_model = LearnedPerceptualImagePatchSimilarity() if self.compute_eval_metrics else None
         vae = VAE_models["vit-l-20-shallow-encoder"]()
         self.vae = vae.eval()
 
@@ -497,7 +498,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
     
     def on_validation_epoch_end(self, namespace="validation") -> None:
         if not self.validation_step_outputs:
-            self._log_stream_metrics()
+            if self.compute_eval_metrics:
+                self._log_stream_metrics()
             return
         
         xs_pred = []
@@ -523,6 +525,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 save_local=self.save_local,
                 local_save_dir=self.local_save_dir,
             )
+
+        if not self.compute_eval_metrics:
+            self.validation_step_outputs.clear()
+            return
 
         if xs is not None:
             # Move data to the same device as LPIPS model for metric calculation
@@ -630,6 +636,13 @@ class WorldMemMinecraft(DiffusionForcingBase):
         if xs_decode is None:
             return None
 
+        def metric_to_float(value):
+            if torch.is_tensor(value):
+                return float(value.detach().cpu().item())
+            if isinstance(value, np.generic):
+                return float(value.item())
+            return float(value)
+
         device = next(self.validation_lpips_model.parameters()).device
         metric_dict = get_validation_metrics_for_videos(
             xs_pred.to(device),
@@ -641,7 +654,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         batch_weight = int(xs_pred.shape[1])
         scalar_metrics = {}
         for key in ("mse", "psnr", "lpips"):
-            value = float(metric_dict[key].detach().cpu().item())
+            value = metric_to_float(metric_dict[key])
             self._stream_metric_sums[key] += value * batch_weight
             scalar_metrics[key] = value
 
@@ -1143,7 +1156,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 log_wandb=False,
             )
 
-        if self.stream_eval_metrics:
+        should_keep_outputs = (not self.save_local_per_batch and self.logger and self.log_video)
+
+        if self.compute_eval_metrics and self.stream_eval_metrics:
             metric_dict = self._accumulate_stream_metrics(xs_pred.detach(), xs_decode.detach())
             if metric_dict:
                 self._write_access_trace(
@@ -1155,8 +1170,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
                         **metric_dict,
                     }
                 )
-        else:
-            # Store results for evaluation (move to CPU to save GPU memory)
+        elif self.compute_eval_metrics or should_keep_outputs:
+            # Store results for evaluation and/or epoch-end video logging.
             self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))
 
         self._write_access_trace(

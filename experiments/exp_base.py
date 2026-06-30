@@ -234,12 +234,13 @@ class BaseLightningExperiment(BaseExperiment):
             else self.cfg.validation.data.shuffle
         )
         if validation_dataset:
+            num_workers = min(os.cpu_count(), self.cfg.validation.data.num_workers)
             return torch.utils.data.DataLoader(
                 validation_dataset,
                 batch_size=self.cfg.validation.batch_size,
-                num_workers=min(os.cpu_count(), self.cfg.validation.data.num_workers),
+                num_workers=num_workers,
                 shuffle=shuffle,
-                persistent_workers=True,
+                persistent_workers=num_workers > 0,
             )
         else:
             return None
@@ -248,12 +249,13 @@ class BaseLightningExperiment(BaseExperiment):
         test_dataset = self._build_dataset("test")
         shuffle = False if isinstance(test_dataset, torch.utils.data.IterableDataset) else self.cfg.test.data.shuffle
         if test_dataset:
+            num_workers = min(os.cpu_count(), self.cfg.test.data.num_workers)
             return torch.utils.data.DataLoader(
                 test_dataset,
                 batch_size=self.cfg.test.batch_size,
-                num_workers=min(os.cpu_count(), self.cfg.test.data.num_workers),
+                num_workers=num_workers,
                 shuffle=shuffle,
-                persistent_workers=True,
+                persistent_workers=num_workers > 0,
             )
         else:
             return None

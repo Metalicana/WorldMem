@@ -339,10 +339,16 @@ SKIP_COMPLETED=1
 
 Both are enabled by default. To force a clean rerun into the same output directory, use `RESUME_PARTIAL=0 SKIP_COMPLETED=0`, but be aware that this can overwrite existing per-batch videos and trace content.
 
-Memory-policy sweep runs are video-only by default: W&B is disabled and eval metrics are not computed. This avoids the LPIPS/MSE/PSNR pass and prevents long `60s_n30` runs from holding decoded videos in RAM just to print a metrics table. To opt back into metrics later, set:
+Memory-policy sweep runs are video-only by default: W&B is disabled, eval metrics are not computed, test dataloading uses `TEST_NUM_WORKERS=0`, and only prediction MP4s are saved. This avoids the LPIPS/MSE/PSNR pass, avoids persistent worker buildup, skips unnecessary GT decoding, and prevents long `60s_n30` runs from holding decoded videos in RAM just to print a metrics table. To opt back into metrics later, set:
 
 ```bash
 COMPUTE_EVAL_METRICS=true STREAM_EVAL_METRICS=true WANDB_MODE=offline
+```
+
+To also save ground-truth videos beside predictions, set:
+
+```bash
+SAVE_GT_VIDEO=true
 ```
 
 For paper-style grids matching the MemCam setup, use 30 videos, durations 10/20/30/60 seconds, and budgets 32/64 for budgeted policies:

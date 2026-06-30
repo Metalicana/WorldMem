@@ -2,6 +2,7 @@ import os
 import random
 import math
 import json
+import gc
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -359,6 +360,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.log_video = cfg.log_video
         self.save_local = getattr(cfg, "save_local", True)
         self.save_local_per_batch = getattr(cfg, "save_local_per_batch", False)
+        self.save_gt_video = getattr(cfg, "save_gt_video", True)
         self.compute_eval_metrics = getattr(cfg, "compute_eval_metrics", True)
         self.stream_eval_metrics = getattr(cfg, "stream_eval_metrics", self.save_local_per_batch)
         self.output_batch_offset = int(getattr(cfg, "output_batch_offset", 0))
@@ -672,6 +674,12 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.log_dict(metrics, sync_dist=True)
         self._stream_metric_sums = {"mse": 0.0, "psnr": 0.0, "lpips": 0.0}
         self._stream_metric_count = 0
+
+    def _release_batch_memory(self):
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
     def _pinned_memory_frames(self):
         if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
@@ -1138,14 +1146,17 @@ class WorldMemMinecraft(DiffusionForcingBase):
             curr_frame += horizon
             pbar.update(horizon)
 
+        pbar.close()
+
         # Decode predictions and ground truth
         xs_pred = self.decode(xs_pred[n_context_frames:].to(conditions.device))
-        xs_decode = self.decode(xs[n_context_frames:].to(conditions.device))
+        needs_gt_decode = self.compute_eval_metrics or self.save_gt_video
+        xs_decode = self.decode(xs[n_context_frames:].to(conditions.device)) if needs_gt_decode else None
 
         if self.save_local and self.save_local_per_batch and self.log_video:
             log_video(
                 xs_pred.detach(),
-                xs_decode.detach(),
+                xs_decode.detach() if xs_decode is not None and self.save_gt_video else None,
                 step=None,
                 namespace=namespace + "_vis",
                 prefix=f"video_batch{global_batch_idx:05d}",
@@ -1159,6 +1170,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
         should_keep_outputs = (not self.save_local_per_batch and self.logger and self.log_video)
 
         if self.compute_eval_metrics and self.stream_eval_metrics:
+            if xs_decode is None:
+                raise ValueError("compute_eval_metrics=true requires decoded ground-truth video.")
             metric_dict = self._accumulate_stream_metrics(xs_pred.detach(), xs_decode.detach())
             if metric_dict:
                 self._write_access_trace(
@@ -1171,6 +1184,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     }
                 )
         elif self.compute_eval_metrics or should_keep_outputs:
+            if xs_decode is None:
+                xs_decode = self.decode(xs[n_context_frames:].to(conditions.device))
             # Store results for evaluation and/or epoch-end video logging.
             self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))
 
@@ -1184,6 +1199,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         )
         self._close_access_trace()
         self._current_global_batch_idx = None
+        self._release_batch_memory()
         return
 
     @torch.no_grad()

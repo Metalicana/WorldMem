@@ -16,6 +16,7 @@ fi
 MEMORY_POLICY="${MEMORY_POLICY:-unbounded}"
 MEMORY_BUDGET="${MEMORY_BUDGET:-}"
 LIMIT_BATCH="${LIMIT_BATCH:-${NUM_VIDEOS:-1}}"
+REQUESTED_LIMIT_BATCH="$LIMIT_BATCH"
 FPS="${FPS:-10}"
 FUTURE_SECONDS="${FUTURE_SECONDS:-}"
 CONTEXT_FRAMES="${CONTEXT_FRAMES:-600}"
@@ -46,6 +47,53 @@ mkdir -p "$OUTPUT_DIR" "$(dirname "$TRACE_PATH")" "$STORAGE_ROOT/tmp"
 export TMPDIR="${TMPDIR:-$STORAGE_ROOT/tmp}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 SAVE_LOCAL_PER_BATCH="${SAVE_LOCAL_PER_BATCH:-true}"
+STREAM_EVAL_METRICS="${STREAM_EVAL_METRICS:-true}"
+RESUME_PARTIAL="${RESUME_PARTIAL:-1}"
+SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
+
+count_completed_batches() {
+  local pred_dir="$1"
+  if [ ! -d "$pred_dir" ]; then
+    echo 0
+    return
+  fi
+
+  find "$pred_dir" -maxdepth 1 -type f -name 'video_batch*.mp4' -size +4k -exec basename {} \; \
+    | sed -nE 's/^video_batch([0-9]+)_.*_rank[0-9]+\.mp4$/\1/p' \
+    | sort -n \
+    | uniq \
+    | awk '
+        BEGIN { expected = 0 }
+        {
+          idx = $1 + 0
+          if (idx == expected) {
+            expected += 1
+          } else if (idx > expected) {
+            exit
+          }
+        }
+        END { print expected }
+      '
+}
+
+COMPLETED_BATCHES="$(count_completed_batches "$OUTPUT_DIR/videos/test_vis/pred")"
+DATASET_START_INDEX="${DATASET_START_INDEX:-0}"
+OUTPUT_BATCH_OFFSET="${OUTPUT_BATCH_OFFSET:-0}"
+RESET_TRACE=0
+
+if { [ "$SKIP_COMPLETED" = "1" ] || [ "$RESUME_PARTIAL" = "1" ]; } && [ "$COMPLETED_BATCHES" -ge "$REQUESTED_LIMIT_BATCH" ]; then
+  echo "Run already has $COMPLETED_BATCHES completed batch videos; requested $REQUESTED_LIMIT_BATCH. Skipping $RUN_NAME."
+  exit 0
+fi
+
+if [ "$RESUME_PARTIAL" = "1" ] && [ "$COMPLETED_BATCHES" -gt 0 ]; then
+  DATASET_START_INDEX="$COMPLETED_BATCHES"
+  OUTPUT_BATCH_OFFSET="$COMPLETED_BATCHES"
+  LIMIT_BATCH=$((REQUESTED_LIMIT_BATCH - COMPLETED_BATCHES))
+  echo "Resuming $RUN_NAME from completed batch count $COMPLETED_BATCHES; remaining batches: $LIMIT_BATCH."
+else
+  RESET_TRACE=1
+fi
 
 cmd=(
   python -m main +name="$RUN_NAME"
@@ -58,6 +106,7 @@ cmd=(
   +seperate_load=true
   dataset.n_frames=8
   dataset.save_dir="$DATA_DIR"
+  +dataset.eval_start_index="$DATASET_START_INDEX"
   +dataset.n_frames_valid="$N_FRAMES_VALID"
   algorithm.diffusion.sampling_timesteps="$SAMPLING_TIMESTEPS"
   +algorithm.memory_condition_length=8
@@ -65,6 +114,8 @@ cmd=(
   +algorithm.log_video=true
   +algorithm.save_local=true
   +algorithm.save_local_per_batch="$SAVE_LOCAL_PER_BATCH"
+  +algorithm.stream_eval_metrics="$STREAM_EVAL_METRICS"
+  +algorithm.output_batch_offset="$OUTPUT_BATCH_OFFSET"
   +dataset.customized_validation=true
   +algorithm.n_tokens=8
   algorithm.context_frames="$CONTEXT_FRAMES"
@@ -89,8 +140,13 @@ echo "Memory budget: ${MEMORY_BUDGET:-none}"
 echo "Future seconds: ${FUTURE_SECONDS:-derived-from-N_FRAMES_VALID}"
 echo "Context frames: $CONTEXT_FRAMES"
 echo "N frames valid: $N_FRAMES_VALID"
-echo "Limit batch/videos: $LIMIT_BATCH"
+echo "Requested batch/videos: $REQUESTED_LIMIT_BATCH"
+echo "Completed batch videos: $COMPLETED_BATCHES"
+echo "Remaining limit batch/videos: $LIMIT_BATCH"
+echo "Dataset start index: $DATASET_START_INDEX"
+echo "Output batch offset: $OUTPUT_BATCH_OFFSET"
 echo "Save local per batch: $SAVE_LOCAL_PER_BATCH"
+echo "Stream eval metrics: $STREAM_EVAL_METRICS"
 echo "Output dir: $OUTPUT_DIR"
 echo "Trace path: $TRACE_PATH"
 
@@ -99,6 +155,10 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
   printf ' %q' "${cmd[@]}"
   printf '\n'
   exit 0
+fi
+
+if [ "$RESET_TRACE" = "1" ]; then
+  : > "$TRACE_PATH"
 fi
 
 "${cmd[@]}"

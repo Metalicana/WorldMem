@@ -56,6 +56,17 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
         random.seed(shuffle_seed)
         self.idx_remap = list(range(self.__len__()))
         random.shuffle(self.idx_remap)
+
+        default_start_index = cfg.get("start_index", 0)
+        if split in {"validation", "test"}:
+            start_index = int(cfg.get(f"{split}_start_index", cfg.get("eval_start_index", default_start_index)))
+        else:
+            start_index = int(cfg.get(f"{split}_start_index", default_start_index))
+        if start_index > 0:
+            if start_index >= len(self.idx_remap):
+                self.idx_remap = []
+            else:
+                self.idx_remap = self.idx_remap[start_index:]
         
     @abstractmethod
     def download_dataset(self) -> Sequence[int]:
@@ -119,6 +130,8 @@ class BaseVideoDataset(torch.utils.data.Dataset, ABC):
         return np.transpose(image, (2, 0, 1))
 
     def __len__(self):
+        if hasattr(self, "idx_remap"):
+            return len(self.idx_remap)
         return self.clips_per_video.sum()
 
     def __getitem__(self, idx):

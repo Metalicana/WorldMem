@@ -324,6 +324,23 @@ Local videos are saved while each batch finishes, not only at the end of a long 
 
 The per-batch filenames look like `video_batch00000_0_rank0.mp4`, `video_batch00001_0_rank0.mp4`, and so on. This behavior is enabled by default in `scripts/run_worldmem_memory_policy_smoke.sh` with `SAVE_LOCAL_PER_BATCH=true`.
 
+The memory-policy runner is restart-friendly by default. Before starting a run, it counts contiguous completed prediction MP4s in:
+
+```text
+<output_dir>/videos/test_vis/pred
+```
+
+If all requested videos are already present, it skips that run. If only the first `N` batch videos are present, it resumes from dataset index `N`, writes the next file as `video_batchNNNNN_0_rank0.mp4`, appends to the access trace, and only runs the remaining batches. This is controlled by:
+
+```bash
+RESUME_PARTIAL=1
+SKIP_COMPLETED=1
+```
+
+Both are enabled by default. To force a clean rerun into the same output directory, use `RESUME_PARTIAL=0 SKIP_COMPLETED=0`, but be aware that this can overwrite existing per-batch videos and trace content.
+
+Long runs also stream metrics per batch by default (`STREAM_EVAL_METRICS=true`) instead of keeping all decoded videos in RAM until epoch end. This reduces memory pressure for `60s_n30` runs.
+
 For paper-style grids matching the MemCam setup, use 30 videos, durations 10/20/30/60 seconds, and budgets 32/64 for budgeted policies:
 
 ```bash

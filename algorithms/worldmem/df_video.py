@@ -359,6 +359,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.log_video = cfg.log_video
         self.save_local = getattr(cfg, "save_local", True)
         self.save_local_per_batch = getattr(cfg, "save_local_per_batch", False)
+        self.stream_eval_metrics = getattr(cfg, "stream_eval_metrics", self.save_local_per_batch)
+        self.output_batch_offset = int(getattr(cfg, "output_batch_offset", 0))
         self.local_save_dir = getattr(cfg, "local_save_dir", None)
         self.lpips_batch_size = getattr(cfg, "lpips_batch_size", 16)
         self.next_frame_length = getattr(cfg, "next_frame_length", 1)
@@ -370,6 +372,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
             raise ValueError(f"{self.memory_policy} memory policy requires +algorithm.memory_budget=<int>")
         self._access_trace_handle = None
         self._last_retrieval_trace = []
+        self._current_global_batch_idx = None
+        self._stream_metric_sums = {"mse": 0.0, "psnr": 0.0, "lpips": 0.0}
+        self._stream_metric_count = 0
 
         super().__init__(cfg)
             
@@ -492,6 +497,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
     
     def on_validation_epoch_end(self, namespace="validation") -> None:
         if not self.validation_step_outputs:
+            self._log_stream_metrics()
             return
         
         xs_pred = []
@@ -520,23 +526,27 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
         if xs is not None:
             # Move data to the same device as LPIPS model for metric calculation
-            device = next(self.validation_lpips_model.parameters()).device
-            xs_pred_device = xs_pred.to(device)
-            xs_device = xs.to(device)
-            
-            metric_dict = get_validation_metrics_for_videos(
-                xs_pred_device, xs_device, 
-                lpips_model=self.validation_lpips_model,
-                lpips_batch_size=self.lpips_batch_size)
-            
-            self.log_dict(
-                {"mse": metric_dict['mse'],
-                "psnr": metric_dict['psnr'],
-                "lpips": metric_dict['lpips']},
-                sync_dist=True
-            )
+            if self.stream_eval_metrics and self._stream_metric_count > 0:
+                self._log_stream_metrics()
+                metric_dict = None
+            else:
+                device = next(self.validation_lpips_model.parameters()).device
+                xs_pred_device = xs_pred.to(device)
+                xs_device = xs.to(device)
+                
+                metric_dict = get_validation_metrics_for_videos(
+                    xs_pred_device, xs_device, 
+                    lpips_model=self.validation_lpips_model,
+                    lpips_batch_size=self.lpips_batch_size)
+                
+                self.log_dict(
+                    {"mse": metric_dict['mse'],
+                    "psnr": metric_dict['psnr'],
+                    "lpips": metric_dict['lpips']},
+                    sync_dist=True
+                )
 
-            if self.log_curve:
+            if self.log_curve and metric_dict is not None:
                 psnr_values = metric_dict['frame_wise_psnr'].cpu().tolist()
                 frames = list(range(len(psnr_values)))
                 line_plot = wandb.plot.line_series(
@@ -595,7 +605,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         trace_dir = os.path.dirname(self.access_trace_path)
         if trace_dir:
             os.makedirs(trace_dir, exist_ok=True)
-        self._access_trace_handle = open(self.access_trace_path, "w", encoding="utf-8")
+        self._access_trace_handle = open(self.access_trace_path, "a", encoding="utf-8")
 
     def _close_access_trace(self):
         if self._access_trace_handle is None:
@@ -611,8 +621,44 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "memory_budget": self.memory_budget,
             **payload,
         }
+        if self._current_global_batch_idx is not None and "global_batch_idx" not in payload:
+            payload["global_batch_idx"] = int(self._current_global_batch_idx)
         self._access_trace_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
         self._access_trace_handle.flush()
+
+    def _accumulate_stream_metrics(self, xs_pred, xs_decode):
+        if xs_decode is None:
+            return None
+
+        device = next(self.validation_lpips_model.parameters()).device
+        metric_dict = get_validation_metrics_for_videos(
+            xs_pred.to(device),
+            xs_decode.to(device),
+            lpips_model=self.validation_lpips_model,
+            lpips_batch_size=self.lpips_batch_size,
+        )
+
+        batch_weight = int(xs_pred.shape[1])
+        scalar_metrics = {}
+        for key in ("mse", "psnr", "lpips"):
+            value = float(metric_dict[key].detach().cpu().item())
+            self._stream_metric_sums[key] += value * batch_weight
+            scalar_metrics[key] = value
+
+        self._stream_metric_count += batch_weight
+        return scalar_metrics
+
+    def _log_stream_metrics(self):
+        if self._stream_metric_count <= 0:
+            return
+
+        metrics = {
+            key: torch.tensor(value / self._stream_metric_count, device=self.device)
+            for key, value in self._stream_metric_sums.items()
+        }
+        self.log_dict(metrics, sync_dist=True)
+        self._stream_metric_sums = {"mse": 0.0, "psnr": 0.0, "lpips": 0.0}
+        self._stream_metric_count = 0
 
     def _pinned_memory_frames(self):
         if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
@@ -968,6 +1014,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
         Returns:
             None: Appends the predicted and ground truth frames to `self.validation_step_outputs`.
         """
+        global_batch_idx = int(batch_idx) + self.output_batch_offset
+        self._current_global_batch_idx = global_batch_idx
+
         # Preprocess the input batch
         memory_condition_length = self.memory_condition_length
         xs_raw, conditions, pose_conditions, c2w_mat, frame_idx = self._preprocess_batch(batch)
@@ -1002,6 +1051,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "event": "memory_run_start",
                 "namespace": namespace,
                 "batch_idx": int(batch_idx),
+                "global_batch_idx": int(global_batch_idx),
                 "n_frames": int(n_frames),
                 "context_frames": int(n_context_frames),
                 "memory_condition_length": int(memory_condition_length),
@@ -1085,7 +1135,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 xs_decode.detach(),
                 step=None,
                 namespace=namespace + "_vis",
-                prefix=f"video_batch{int(batch_idx):05d}",
+                prefix=f"video_batch{global_batch_idx:05d}",
                 context_frames=self.context_frames,
                 logger=None,
                 save_local=True,
@@ -1093,16 +1143,32 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 log_wandb=False,
             )
 
-        # Store results for evaluation (move to CPU to save GPU memory)
-        self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))
+        if self.stream_eval_metrics:
+            metric_dict = self._accumulate_stream_metrics(xs_pred.detach(), xs_decode.detach())
+            if metric_dict:
+                self._write_access_trace(
+                    {
+                        "event": "batch_metrics",
+                        "namespace": namespace,
+                        "batch_idx": int(batch_idx),
+                        "global_batch_idx": int(global_batch_idx),
+                        **metric_dict,
+                    }
+                )
+        else:
+            # Store results for evaluation (move to CPU to save GPU memory)
+            self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))
+
         self._write_access_trace(
             {
                 "event": "memory_run_end",
                 "namespace": namespace,
                 "batch_idx": int(batch_idx),
+                "global_batch_idx": int(global_batch_idx),
             }
         )
         self._close_access_trace()
+        self._current_global_batch_idx = None
         return
 
     @torch.no_grad()

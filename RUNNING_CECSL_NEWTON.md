@@ -449,6 +449,62 @@ For Newton, create the environment according to the cluster's module/conda polic
 
 If you add a Hydra cluster config later, `main.py` will detect `cluster=...` and submit through Slurm instead of running locally.
 
+## Metrics For Memory-Policy Videos
+
+After `worldmem_unbounded_60s_n30`, `worldmem_fifo_b32_60s_n30`, and `worldmem_fifo_b64_60s_n30` have generated prediction MP4s, compute FVD prefix curves from the 60s videos:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS=worldmem_unbounded_60s_n30,worldmem_fifo_b32_60s_n30,worldmem_fifo_b64_60s_n30 \
+EVAL_DURATIONS=10,20,30,60 \
+bash scripts/evaluate_worldmem_fvd.sh
+```
+
+Outputs:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix/summary.csv
+/data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix/summary.json
+```
+
+For CUT3R camera trajectory metrics, use the MemCam/CUT3R checkout and checkpoint. Start with a smoke subset:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+CUT3R_ROOT=$HOME/MemCam/CUT3R \
+CUT3R_MODEL=$HOME/MemCam/CUT3R/src/cut3r_512_dpt_4_64.pth \
+LIMIT=1 \
+bash scripts/run_worldmem_cut3r_metrics.sh
+```
+
+If the smoke passes, run the full 30-video set:
+
+```bash
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+CUT3R_ROOT=$HOME/MemCam/CUT3R \
+CUT3R_MODEL=$HOME/MemCam/CUT3R/src/cut3r_512_dpt_4_64.pth \
+bash scripts/run_worldmem_cut3r_metrics.sh
+```
+
+CUT3R outputs:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_pose_recon/
+/data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_camera_metrics/cut3r_camera_summary.csv
+/data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_camera_metrics/cut3r_camera_metrics.csv
+```
+
+The WorldMem metric scripts reconstruct matching ground-truth frames/poses from the Minecraft test split using the same deterministic seed (`42`), initial skipped frames (`100`), and context length (`600`) used for generation. The saved prediction videos contain only the generated future; the scripts compare frame `k` of each MP4 to dataset frame `100 + 600 + k`.
+
 ## Common Issues
 
 - `ModuleNotFoundError`: reactivate `conda activate worldmem`, then reinstall missing packages.

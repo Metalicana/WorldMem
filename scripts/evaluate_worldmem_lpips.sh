@@ -25,6 +25,7 @@ METRIC_BATCH_SIZE="${METRIC_BATCH_SIZE:-16}"
 LPIPS_IMAGE_SIZE="${LPIPS_IMAGE_SIZE:-}"
 
 cd "$WORLDMEM_REPO_ROOT"
+export PYTHONPATH="$WORLDMEM_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 cmd=(
   python utils/evaluate_worldmem_lpips_prefix_curves.py

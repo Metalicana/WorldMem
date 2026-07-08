@@ -382,6 +382,91 @@ NUM_VIDEOS=2 DURATIONS=10 POLICIES=unbounded,fifo BUDGETS=32 \
 bash scripts/run_worldmem_memory_policy_grid.sh
 ```
 
+## 180s Pivot Runs
+
+For the bounded-memory story, a useful next target is 180-second generation with fewer videos per run. With 600 context frames and 10 FPS, 180 seconds means:
+
+```text
+future frames = 1800
+N_FRAMES_VALID = 600 + 1800 = 2400
+required source frames/actions/poses = 100 initial skip + 2400 = 2500
+```
+
+Before launching the run, check whether the downloaded Minecraft test clips can actually supply that much ground-truth action/pose/video:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+python utils/check_worldmem_horizon_availability.py \
+  --data_dir data/minecraft \
+  --future_seconds 180 \
+  --context_frames 600 \
+  --num_videos 15
+```
+
+If the first 15 selected videos are all `OK`, launch the tight 180s grid:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=15 \
+DURATIONS=180 \
+POLICIES=unbounded,fifo,rarity_irreplaceability,slam_covisibility \
+BUDGETS=32,64 \
+bash scripts/run_worldmem_memory_policy_180s_tight.sh
+```
+
+That produces seven runs:
+
+```text
+worldmem_unbounded_180s_n15
+worldmem_fifo_b32_180s_n15
+worldmem_fifo_b64_180s_n15
+worldmem_rarity_irreplaceability_b32_180s_n15
+worldmem_rarity_irreplaceability_b64_180s_n15
+worldmem_slam_covisibility_b32_180s_n15
+worldmem_slam_covisibility_b64_180s_n15
+```
+
+If the availability check reports `SHORT`, do not treat a 180s GT-backed run as valid yet. Options are: reduce the future horizon to the longest supported value, reduce the context length, generate longer Minecraft trajectories, or build a custom action/pose rollout for qualitative/self-consistency tests without future-GT metrics.
+
+For FVD on the 180s runs:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS=worldmem_unbounded_180s_n15,worldmem_fifo_b32_180s_n15,worldmem_fifo_b64_180s_n15,worldmem_rarity_irreplaceability_b32_180s_n15,worldmem_rarity_irreplaceability_b64_180s_n15,worldmem_slam_covisibility_b32_180s_n15,worldmem_slam_covisibility_b64_180s_n15 \
+EVAL_DURATIONS=30,60,120,180 \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix_180s_n15 \
+bash scripts/evaluate_worldmem_fvd.sh
+```
+
+For CUT3R on the 180s runs:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+CUT3R_ROOT=$HOME/MemCam/CUT3R \
+CUT3R_MODEL=$HOME/MemCam/CUT3R/src/cut3r_512_dpt_4_64.pth \
+RUNS=worldmem_unbounded_180s_n15,worldmem_fifo_b32_180s_n15,worldmem_fifo_b64_180s_n15,worldmem_rarity_irreplaceability_b32_180s_n15,worldmem_rarity_irreplaceability_b64_180s_n15,worldmem_slam_covisibility_b32_180s_n15,worldmem_slam_covisibility_b64_180s_n15 \
+DURATION_SEC=180 \
+FRAME_STRIDE=30 \
+MAX_FRAMES=120 \
+RECON_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_pose_recon_180s_n15 \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_camera_metrics_180s_n15 \
+bash scripts/run_worldmem_cut3r_metrics.sh
+```
+
 Newton Slurm array for the full 28-run grid:
 
 ```bash
@@ -451,7 +536,38 @@ If you add a Hydra cluster config later, `main.py` will detect `cluster=...` and
 
 ## Metrics For Memory-Policy Videos
 
-After `worldmem_unbounded_60s_n30`, `worldmem_fifo_b32_60s_n30`, and `worldmem_fifo_b64_60s_n30` have generated prediction MP4s, compute FVD prefix curves from the 60s videos:
+After the 60s/30-video policy runs have generated prediction MP4s, compute FVD prefix curves from the 60s videos. As of the CECSL check below, all seven target runs are complete:
+
+```text
+worldmem_unbounded_60s_n30
+worldmem_fifo_b32_60s_n30
+worldmem_fifo_b64_60s_n30
+worldmem_rarity_irreplaceability_b32_60s_n30
+worldmem_rarity_irreplaceability_b64_60s_n30
+worldmem_slam_covisibility_b32_60s_n30
+worldmem_slam_covisibility_b64_60s_n30
+```
+
+Verify completion on CECSL with:
+
+```bash
+cd /data/ab575577/worldmem/outputs/memory_policy
+
+for r in \
+  worldmem_unbounded_60s_n30 \
+  worldmem_fifo_b32_60s_n30 \
+  worldmem_fifo_b64_60s_n30 \
+  worldmem_rarity_irreplaceability_b32_60s_n30 \
+  worldmem_rarity_irreplaceability_b64_60s_n30 \
+  worldmem_slam_covisibility_b32_60s_n30 \
+  worldmem_slam_covisibility_b64_60s_n30
+do
+  printf "%-55s " "$r"
+  find "$r/videos/test_vis/pred" -name '*.mp4' 2>/dev/null | wc -l
+done
+```
+
+Then run FVD:
 
 ```bash
 cd ~/WorldMem
@@ -459,7 +575,6 @@ conda activate worldmem
 
 WORLDMEM_REPO_ROOT=$HOME/WorldMem \
 WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
-RUNS=worldmem_unbounded_60s_n30,worldmem_fifo_b32_60s_n30,worldmem_fifo_b64_60s_n30 \
 EVAL_DURATIONS=10,20,30,60 \
 bash scripts/evaluate_worldmem_fvd.sh
 ```
@@ -470,6 +585,62 @@ Outputs:
 /data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix/summary.csv
 /data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix/summary.json
 ```
+
+Observed CECSL FVD prefix results for the 60s/30-video runs, from `/data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix/summary.csv` on 2026-07-08. Lower is better.
+
+| Run | FVD@10s | FVD@20s | FVD@30s | FVD@60s | FVD@60s - FVD@10s | Gap vs unbounded @60s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `worldmem_slam_covisibility_b32_60s_n30` | 672.178 | 583.125 | 629.683 | 696.808 | 24.630 | -2271.743 |
+| `worldmem_rarity_irreplaceability_b64_60s_n30` | 629.728 | 578.193 | 676.294 | 766.039 | 136.311 | -2202.512 |
+| `worldmem_rarity_irreplaceability_b32_60s_n30` | 620.664 | 580.070 | 625.066 | 778.176 | 157.512 | -2190.375 |
+| `worldmem_slam_covisibility_b64_60s_n30` | 669.509 | 573.441 | 593.596 | 785.111 | 115.602 | -2183.440 |
+| `worldmem_unbounded_60s_n30` | 743.733 | 820.271 | 1298.265 | 2968.551 | 2224.817 | 0.000 |
+| `worldmem_fifo_b64_60s_n30` | 752.786 | 914.158 | 1491.072 | 3413.941 | 2661.155 | 445.390 |
+| `worldmem_fifo_b32_60s_n30` | 872.445 | 1526.977 | 2152.052 | 3611.819 | 2739.373 | 643.268 |
+
+Interpretation for the current paper story:
+
+- Smart bounded memory is not just matching unbounded on FVD; RI and SLAM-style covisibility beat unbounded at every prefix and by more than 2000 FVD points at 60s.
+- FIFO is a useful negative control: simply bounding memory is not enough. The choice of retained memories matters.
+- The unbounded run degrades sharply with horizon (`60s - 10s = 2224.817`), while RI/SLAM remain much flatter. This supports the story that unbounded memory can accumulate harmful or conflicting retrieval candidates during long generation.
+- This is FVD evidence only. Use CUT3R trajectory metrics, revisit consistency, and qualitative grids before making the stronger claim that bounded memory is generally better.
+
+To compute LPIPS prefix curves on the same saved videos:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+EVAL_DURATIONS=10,20,30,60 \
+bash scripts/evaluate_worldmem_lpips.sh
+```
+
+Outputs:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/lpips_prefix/summary.csv
+/data/ab575577/worldmem/outputs/memory_policy/metrics/lpips_prefix/summary.json
+```
+
+Print the LPIPS table and gaps against unbounded:
+
+```bash
+cd /data/ab575577/worldmem/outputs/memory_policy/metrics/lpips_prefix
+
+python - <<'PY'
+import pandas as pd
+df = pd.read_csv("summary.csv")
+p = df.pivot(index="run_name", columns="duration_sec", values="lpips")
+u = p.loc["worldmem_unbounded_60s_n30"]
+for d in [10, 20, 30, 60]:
+    p[f"gap_vs_unbounded_{d}s"] = p[d] - u[d]
+print(p.sort_values(60).to_string())
+PY
+```
+
+This post-hoc LPIPS evaluator compares saved prediction MP4s to frame-aligned dataset GT, resizing GT to the prediction video resolution when needed. It is the right apples-to-apples comparison across memory policies. It is close to, but not identical to, WorldMem's original internal LPIPS path because the 60s memory-policy runs did not save VAE-decoded GT videos.
 
 For CUT3R camera trajectory metrics, use the MemCam/CUT3R checkout and checkpoint. Start with a smoke subset:
 

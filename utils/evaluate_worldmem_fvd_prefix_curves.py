@@ -337,7 +337,7 @@ def write_csv(path, rows):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compute FVD prefix curves for WorldMem 60s generated videos."
+        description="Compute FVD prefix curves for WorldMem generated videos."
     )
     parser.add_argument("--output_root", type=Path, required=True)
     parser.add_argument("--data_dir", type=Path, required=True)

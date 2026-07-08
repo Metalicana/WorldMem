@@ -56,7 +56,7 @@ def discover_run_dirs(output_root, runs=None):
         return [(run, output_root / run) for run in runs]
     return [
         (path.name, path)
-        for path in sorted(output_root.glob("worldmem_*_60s_n*"))
+        for path in sorted(output_root.glob("worldmem_*_*s_n*"))
         if (path / "videos" / "test_vis" / "pred").is_dir()
     ]
 

@@ -7,8 +7,9 @@ NUM_VIDEOS="${NUM_VIDEOS:-15}"
 DURATIONS="${DURATIONS:-180}"
 POLICIES="${POLICIES:-unbounded,fifo,rarity_irreplaceability,slam_covisibility}"
 BUDGETS="${BUDGETS:-32,64}"
+CHECK_HORIZON="${CHECK_HORIZON:-1}"
 
-export NUM_VIDEOS DURATIONS POLICIES BUDGETS
+export NUM_VIDEOS DURATIONS POLICIES BUDGETS CHECK_HORIZON
 
 echo "WorldMem 180s tight memory-policy grid"
 echo "Videos per run: $NUM_VIDEOS"

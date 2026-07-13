@@ -420,7 +420,7 @@ BUDGETS=32,64 \
 bash scripts/run_worldmem_memory_policy_180s_tight.sh
 ```
 
-That produces seven runs:
+That default tight grid produces seven runs:
 
 ```text
 worldmem_unbounded_180s_n15
@@ -432,6 +432,77 @@ worldmem_slam_covisibility_b32_180s_n15
 worldmem_slam_covisibility_b64_180s_n15
 ```
 
+To match the MemCam 180s benchmark exactly, use budgets 16/32/64/128 for FIFO, RI, and SLAM-style covisibility, plus the unbounded baseline:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=15 \
+DURATIONS=180 \
+POLICIES=unbounded,fifo,rarity_irreplaceability,slam_covisibility \
+BUDGETS=16,32,64,128 \
+bash scripts/run_worldmem_memory_policy_180s_tight.sh
+```
+
+This produces 13 runs:
+
+```text
+worldmem_unbounded_180s_n15
+worldmem_fifo_b16_180s_n15
+worldmem_fifo_b32_180s_n15
+worldmem_fifo_b64_180s_n15
+worldmem_fifo_b128_180s_n15
+worldmem_rarity_irreplaceability_b16_180s_n15
+worldmem_rarity_irreplaceability_b32_180s_n15
+worldmem_rarity_irreplaceability_b64_180s_n15
+worldmem_rarity_irreplaceability_b128_180s_n15
+worldmem_slam_covisibility_b16_180s_n15
+worldmem_slam_covisibility_b32_180s_n15
+worldmem_slam_covisibility_b64_180s_n15
+worldmem_slam_covisibility_b128_180s_n15
+```
+
+For a cheaper pilot before the full MemCam-matched grid, run 3 videos with only unbounded and the two smart policies at budget 32:
+
+```bash
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=3 \
+DURATIONS=180 \
+POLICIES=unbounded,rarity_irreplaceability,slam_covisibility \
+BUDGETS=32 \
+bash scripts/run_worldmem_memory_policy_180s_tight.sh
+```
+
+To run the MemCam-matched 180s grid in round-robin order, use the dedicated round-robin runner. It keeps output directories stable at `..._180s_n15`, and each sweep asks every run to reach one additional completed video. This means sweep 1 generates video 1 for every run, sweep 2 generates video 2 for every run, and so on:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+TOTAL_VIDEOS=15 \
+DURATIONS=180 \
+POLICIES=unbounded,fifo,rarity_irreplaceability,slam_covisibility \
+BUDGETS=16,32,64,128 \
+bash scripts/run_worldmem_memory_policy_round_robin.sh
+```
+
+To stop after 7 preliminary videos per run, use:
+
+```bash
+TOTAL_VIDEOS=15 \
+END_VIDEO=7 \
+DURATIONS=180 \
+POLICIES=unbounded,fifo,rarity_irreplaceability,slam_covisibility \
+BUDGETS=16,32,64,128 \
+bash scripts/run_worldmem_memory_policy_round_robin.sh
+```
+
 If the availability check reports `SHORT`, do not treat a 180s GT-backed run as valid yet. Options are: reduce the future horizon to the longest supported value, reduce the context length, generate longer Minecraft trajectories, or build a custom action/pose rollout for qualitative/self-consistency tests without future-GT metrics.
 
 For FVD on the 180s runs:
@@ -440,12 +511,30 @@ For FVD on the 180s runs:
 cd ~/WorldMem
 conda activate worldmem
 
+RUNS_180=worldmem_unbounded_180s_n15,worldmem_fifo_b16_180s_n15,worldmem_fifo_b32_180s_n15,worldmem_fifo_b64_180s_n15,worldmem_fifo_b128_180s_n15,worldmem_rarity_irreplaceability_b16_180s_n15,worldmem_rarity_irreplaceability_b32_180s_n15,worldmem_rarity_irreplaceability_b64_180s_n15,worldmem_rarity_irreplaceability_b128_180s_n15,worldmem_slam_covisibility_b16_180s_n15,worldmem_slam_covisibility_b32_180s_n15,worldmem_slam_covisibility_b64_180s_n15,worldmem_slam_covisibility_b128_180s_n15
+
 WORLDMEM_REPO_ROOT=$HOME/WorldMem \
 WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
-RUNS=worldmem_unbounded_180s_n15,worldmem_fifo_b32_180s_n15,worldmem_fifo_b64_180s_n15,worldmem_rarity_irreplaceability_b32_180s_n15,worldmem_rarity_irreplaceability_b64_180s_n15,worldmem_slam_covisibility_b32_180s_n15,worldmem_slam_covisibility_b64_180s_n15 \
+RUNS=$RUNS_180 \
 EVAL_DURATIONS=30,60,120,180 \
 METRICS_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix_180s_n15 \
 bash scripts/evaluate_worldmem_fvd.sh
+```
+
+For LPIPS on the 180s runs:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+RUNS_180=worldmem_unbounded_180s_n15,worldmem_fifo_b16_180s_n15,worldmem_fifo_b32_180s_n15,worldmem_fifo_b64_180s_n15,worldmem_fifo_b128_180s_n15,worldmem_rarity_irreplaceability_b16_180s_n15,worldmem_rarity_irreplaceability_b32_180s_n15,worldmem_rarity_irreplaceability_b64_180s_n15,worldmem_rarity_irreplaceability_b128_180s_n15,worldmem_slam_covisibility_b16_180s_n15,worldmem_slam_covisibility_b32_180s_n15,worldmem_slam_covisibility_b64_180s_n15,worldmem_slam_covisibility_b128_180s_n15
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS=$RUNS_180 \
+EVAL_DURATIONS=30,60,120,180 \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/lpips_prefix_180s_n15 \
+bash scripts/evaluate_worldmem_lpips.sh
 ```
 
 For CUT3R on the 180s runs:
@@ -454,11 +543,13 @@ For CUT3R on the 180s runs:
 cd ~/WorldMem
 conda activate worldmem
 
+RUNS_180=worldmem_unbounded_180s_n15,worldmem_fifo_b16_180s_n15,worldmem_fifo_b32_180s_n15,worldmem_fifo_b64_180s_n15,worldmem_fifo_b128_180s_n15,worldmem_rarity_irreplaceability_b16_180s_n15,worldmem_rarity_irreplaceability_b32_180s_n15,worldmem_rarity_irreplaceability_b64_180s_n15,worldmem_rarity_irreplaceability_b128_180s_n15,worldmem_slam_covisibility_b16_180s_n15,worldmem_slam_covisibility_b32_180s_n15,worldmem_slam_covisibility_b64_180s_n15,worldmem_slam_covisibility_b128_180s_n15
+
 WORLDMEM_REPO_ROOT=$HOME/WorldMem \
 WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
 CUT3R_ROOT=$HOME/MemCam/CUT3R \
 CUT3R_MODEL=$HOME/MemCam/CUT3R/src/cut3r_512_dpt_4_64.pth \
-RUNS=worldmem_unbounded_180s_n15,worldmem_fifo_b32_180s_n15,worldmem_fifo_b64_180s_n15,worldmem_rarity_irreplaceability_b32_180s_n15,worldmem_rarity_irreplaceability_b64_180s_n15,worldmem_slam_covisibility_b32_180s_n15,worldmem_slam_covisibility_b64_180s_n15 \
+RUNS=$RUNS_180 \
 DURATION_SEC=180 \
 FRAME_STRIDE=30 \
 MAX_FRAMES=120 \
@@ -535,6 +626,8 @@ For Newton, create the environment according to the cluster's module/conda polic
 If you add a Hydra cluster config later, `main.py` will detect `cluster=...` and submit through Slurm instead of running locally.
 
 ## Metrics For Memory-Policy Videos
+
+WorldMem's released `evaluate.sh`/`infer.sh` setup uses `dataset.n_frames_valid=700` with `algorithm.context_frames=600`. At 10 FPS, that means their reproduced quantitative setup is 600 context/memory frames plus 100 generated future frames: 60 seconds of history and 10 seconds of generated video. This is different from the 60-second memory-policy runs here, which use `n_frames_valid=1200` and generate 600 future frames.
 
 After the 60s/30-video policy runs have generated prediction MP4s, compute FVD prefix curves from the 60s videos. As of the CECSL check below, all seven target runs are complete:
 
@@ -641,6 +734,25 @@ PY
 ```
 
 This post-hoc LPIPS evaluator compares saved prediction MP4s to frame-aligned dataset GT, resizing GT to the prediction video resolution when needed. It is the right apples-to-apples comparison across memory policies. It is close to, but not identical to, WorldMem's original internal LPIPS path because the 60s memory-policy runs did not save VAE-decoded GT videos.
+
+Observed CECSL LPIPS prefix results for the 60s/30-video runs, from `/data/ab575577/worldmem/outputs/memory_policy/metrics/lpips_prefix/summary.csv` on 2026-07-08. Lower is better.
+
+| Run | LPIPS@10s | LPIPS@20s | LPIPS@30s | LPIPS@60s | Gap vs unbounded @60s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `worldmem_slam_covisibility_b32_60s_n30` | 0.514968 | 0.540618 | 0.561542 | 0.562467 | -0.102720 |
+| `worldmem_rarity_irreplaceability_b64_60s_n30` | 0.514690 | 0.549945 | 0.566514 | 0.565072 | -0.100115 |
+| `worldmem_slam_covisibility_b64_60s_n30` | 0.512701 | 0.542228 | 0.558144 | 0.567476 | -0.097711 |
+| `worldmem_rarity_irreplaceability_b32_60s_n30` | 0.512983 | 0.551988 | 0.570109 | 0.573680 | -0.091507 |
+| `worldmem_unbounded_60s_n30` | 0.512044 | 0.568492 | 0.604595 | 0.665187 | 0.000000 |
+| `worldmem_fifo_b64_60s_n30` | 0.518849 | 0.565213 | 0.607281 | 0.698907 | 0.033720 |
+| `worldmem_fifo_b32_60s_n30` | 0.528668 | 0.587703 | 0.634050 | 0.722850 | 0.057663 |
+
+Interpretation:
+
+- At 10s, unbounded and smart bounded policies are nearly tied, which is important because 10s is closest to WorldMem's released quantitative horizon.
+- The gap opens with horizon. By 60s, RI/SLAM-style policies are about 0.09 to 0.10 LPIPS better than unbounded.
+- FIFO again acts as a negative control: it is worse than unbounded at 30s/60s. The gain is from selective retention, not merely bounding memory.
+- These numbers should not be compared directly to WorldMem's paper LPIPS (`0.1429`) because the paper uses its internal 10s eval path, while this is post-hoc MP4-vs-raw-GT evaluation. The policy comparison here is still apples-to-apples.
 
 For CUT3R camera trajectory metrics, use the MemCam/CUT3R checkout and checkpoint. Start with a smoke subset:
 

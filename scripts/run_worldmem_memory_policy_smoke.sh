@@ -26,6 +26,7 @@ else
   N_FRAMES_VALID="${N_FRAMES_VALID:-700}"
 fi
 SAMPLING_TIMESTEPS="${SAMPLING_TIMESTEPS:-20}"
+DECODE_CHUNK_SIZE="${DECODE_CHUNK_SIZE:-64}"
 DATA_DIR="${WORLDMEM_DATA_DIR:-data/minecraft}"
 RUN_NAME_SUFFIX="${RUN_NAME_SUFFIX:-${FUTURE_SECONDS:+_${FUTURE_SECONDS}s}_n${LIMIT_BATCH}}"
 RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGET}}${RUN_NAME_SUFFIX}}"
@@ -147,6 +148,7 @@ cmd=(
   +dataset.eval_start_index="$DATASET_START_INDEX"
   +dataset.n_frames_valid="$N_FRAMES_VALID"
   algorithm.diffusion.sampling_timesteps="$SAMPLING_TIMESTEPS"
+  +algorithm.decode_chunk_size="$DECODE_CHUNK_SIZE"
   +algorithm.memory_condition_length=8
   +algorithm.lpips_batch_size=16
   +algorithm.log_video=true
@@ -196,6 +198,7 @@ echo "Compute eval metrics: $COMPUTE_EVAL_METRICS"
 echo "Stream eval metrics: $STREAM_EVAL_METRICS"
 echo "Test num workers: $TEST_NUM_WORKERS"
 echo "PYTORCH_CUDA_ALLOC_CONF: $PYTORCH_CUDA_ALLOC_CONF"
+echo "Decode chunk size: $DECODE_CHUNK_SIZE"
 echo "Resume requires metrics: $RESUME_REQUIRE_METRICS"
 echo "Output dir: $OUTPUT_DIR"
 echo "Trace path: $TRACE_PATH"

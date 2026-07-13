@@ -366,6 +366,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.output_batch_offset = int(getattr(cfg, "output_batch_offset", 0))
         self.local_save_dir = getattr(cfg, "local_save_dir", None)
         self.lpips_batch_size = getattr(cfg, "lpips_batch_size", 16)
+        self.decode_chunk_size = int(getattr(cfg, "decode_chunk_size", 64))
         self.next_frame_length = getattr(cfg, "next_frame_length", 1)
         self.require_pose_prediction = getattr(cfg, "require_pose_prediction", False)
         self.memory_policy = getattr(cfg, "memory_policy", "unbounded")
@@ -606,6 +607,18 @@ class WorldMemMinecraft(DiffusionForcingBase):
             x = (self.vae.decode(x / scaling_factor) + 1) / 2
         x = rearrange(x, "(t b) c h w-> t b c h w", t=total_frames)
         return x
+
+    def decode_in_chunks(self, x):
+        if self.decode_chunk_size <= 0 or x.shape[0] <= self.decode_chunk_size:
+            return self.decode(x)
+
+        decoded = []
+        for start in range(0, x.shape[0], self.decode_chunk_size):
+            end = min(start + self.decode_chunk_size, x.shape[0])
+            decoded.append(self.decode(x[start:end]))
+            if x.is_cuda:
+                torch.cuda.empty_cache()
+        return torch.cat(decoded, dim=0)
 
     def _open_access_trace(self):
         if not self.access_trace_path or self._access_trace_handle is not None:
@@ -1149,9 +1162,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
         pbar.close()
 
         # Decode predictions and ground truth
-        xs_pred = self.decode(xs_pred[n_context_frames:].to(conditions.device))
+        xs_pred = self.decode_in_chunks(xs_pred[n_context_frames:].to(conditions.device))
         needs_gt_decode = self.compute_eval_metrics or self.save_gt_video
-        xs_decode = self.decode(xs[n_context_frames:].to(conditions.device)) if needs_gt_decode else None
+        xs_decode = self.decode_in_chunks(xs[n_context_frames:].to(conditions.device)) if needs_gt_decode else None
 
         if self.save_local and self.save_local_per_batch and self.log_video:
             log_video(
@@ -1185,7 +1198,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 )
         elif self.compute_eval_metrics or should_keep_outputs:
             if xs_decode is None:
-                xs_decode = self.decode(xs[n_context_frames:].to(conditions.device))
+                xs_decode = self.decode_in_chunks(xs[n_context_frames:].to(conditions.device))
             # Store results for evaluation and/or epoch-end video logging.
             self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))
 
@@ -1335,7 +1348,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             ai += next_horizon
 
         memory_latent_frames = torch.cat([memory_latent_frames, xs_pred[n_context_frames:]])
-        xs_pred = self.decode(xs_pred[n_context_frames:].to(device)).cpu()
+        xs_pred = self.decode_in_chunks(xs_pred[n_context_frames:].to(device)).cpu()
 
         return xs_pred.cpu().numpy(), memory_latent_frames.cpu().numpy(), memory_actions.cpu().numpy(), \
             memory_poses.cpu().numpy(), memory_c2w.cpu().numpy(), memory_frame_idx.cpu().numpy()

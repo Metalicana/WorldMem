@@ -788,6 +788,34 @@ CUT3R outputs:
 
 The WorldMem metric scripts reconstruct matching ground-truth frames/poses from the Minecraft test split using the same deterministic seed (`42`), initial skipped frames (`100`), and context length (`600`) used for generation. The saved prediction videos contain only the generated future; the scripts compare frame `k` of each MP4 to dataset frame `100 + 600 + k`.
 
+## Revisit Candidates
+
+Before using pixel-level revisit matching, check whether the selected WorldMem test trajectories actually revisit earlier context poses. This script scans the GT pose traces for future frames that return near a pose from the 600-frame context:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=30 \
+FUTURE_SECONDS=60 \
+CONTEXT_FRAMES=600 \
+POS_THRESHOLD=1.0 \
+YAW_THRESHOLD=20 \
+bash scripts/analyze_worldmem_revisits.sh
+```
+
+Outputs:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/revisit_candidates/revisit_summary.csv
+/data/ab575577/worldmem/outputs/memory_policy/metrics/revisit_candidates/revisit_pairs.csv
+/data/ab575577/worldmem/outputs/memory_policy/metrics/revisit_candidates/revisit_details.jsonl
+```
+
+Use `revisit_pairs.csv` as the candidate set for later pixel/LPIPS/L2 matching. If this scan finds few or no pairs, then the WorldMem Minecraft test set is weak for a revisit-place metric and CUT3R/trajectory consistency should carry more of the geometry story.
+
 ## Common Issues
 
 - `ModuleNotFoundError`: reactivate `conda activate worldmem`, then reinstall missing packages.

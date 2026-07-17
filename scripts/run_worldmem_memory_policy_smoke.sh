@@ -57,6 +57,7 @@ TEST_NUM_WORKERS="${TEST_NUM_WORKERS:-0}"
 RESUME_PARTIAL="${RESUME_PARTIAL:-1}"
 SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
 RESUME_REQUIRE_METRICS="${RESUME_REQUIRE_METRICS:-false}"
+PROFILE_CUDA_MEMORY="${PROFILE_CUDA_MEMORY:-false}"
 
 count_completed_batches() {
   local pred_dir="$1"
@@ -157,6 +158,7 @@ cmd=(
   +algorithm.save_gt_video="$SAVE_GT_VIDEO"
   +algorithm.compute_eval_metrics="$COMPUTE_EVAL_METRICS"
   +algorithm.stream_eval_metrics="$STREAM_EVAL_METRICS"
+  +algorithm.profile_cuda_memory="$PROFILE_CUDA_MEMORY"
   +algorithm.output_batch_offset="$OUTPUT_BATCH_OFFSET"
   +dataset.customized_validation=true
   +algorithm.n_tokens=8
@@ -196,6 +198,7 @@ echo "Save local per batch: $SAVE_LOCAL_PER_BATCH"
 echo "Save GT video: $SAVE_GT_VIDEO"
 echo "Compute eval metrics: $COMPUTE_EVAL_METRICS"
 echo "Stream eval metrics: $STREAM_EVAL_METRICS"
+echo "Profile CUDA memory: $PROFILE_CUDA_MEMORY"
 echo "Test num workers: $TEST_NUM_WORKERS"
 echo "PYTORCH_CUDA_ALLOC_CONF: $PYTORCH_CUDA_ALLOC_CONF"
 echo "Decode chunk size: $DECODE_CHUNK_SIZE"

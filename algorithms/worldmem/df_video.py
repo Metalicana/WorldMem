@@ -372,6 +372,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.memory_policy = getattr(cfg, "memory_policy", "unbounded")
         self.memory_budget = getattr(cfg, "memory_budget", None)
         self.access_trace_path = getattr(cfg, "access_trace_path", None)
+        self.profile_cuda_memory = getattr(cfg, "profile_cuda_memory", False)
         if self.memory_policy in BUDGETED_MEMORY_POLICIES and self.memory_budget is None:
             raise ValueError(f"{self.memory_policy} memory policy requires +algorithm.memory_budget=<int>")
         self._access_trace_handle = None
@@ -693,6 +694,36 @@ class WorldMemMinecraft(DiffusionForcingBase):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
+
+    def _reset_cuda_memory_peak(self):
+        if not self.profile_cuda_memory or not torch.cuda.is_available():
+            return
+        device = torch.cuda.current_device()
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
+
+    def _write_cuda_memory_trace(self, event, **fields):
+        if not self.profile_cuda_memory or not torch.cuda.is_available():
+            return
+
+        device = torch.cuda.current_device()
+        torch.cuda.synchronize(device)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        mib = 1024**2
+        self._write_access_trace(
+            {
+                "event": event,
+                "cuda_device": int(device),
+                "cuda_device_name": torch.cuda.get_device_name(device),
+                "memory_allocated_mib": float(torch.cuda.memory_allocated(device) / mib),
+                "max_memory_allocated_mib": float(torch.cuda.max_memory_allocated(device) / mib),
+                "memory_reserved_mib": float(torch.cuda.memory_reserved(device) / mib),
+                "max_memory_reserved_mib": float(torch.cuda.max_memory_reserved(device) / mib),
+                "cuda_free_mib": float(free_bytes / mib),
+                "cuda_total_mib": float(total_bytes / mib),
+                **fields,
+            }
+        )
 
     def _pinned_memory_frames(self):
         if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
@@ -1050,6 +1081,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
         """
         global_batch_idx = int(batch_idx) + self.output_batch_offset
         self._current_global_batch_idx = global_batch_idx
+        self._open_access_trace()
+        self._reset_cuda_memory_peak()
+        self._write_cuda_memory_trace(
+            "cuda_memory_batch_start",
+            namespace=namespace,
+            batch_idx=int(batch_idx),
+            global_batch_idx=int(global_batch_idx),
+        )
 
         # Preprocess the input batch
         memory_condition_length = self.memory_condition_length
@@ -1073,7 +1112,6 @@ class WorldMemMinecraft(DiffusionForcingBase):
         n_context_frames = self.context_frames // self.frame_stack
         xs_pred = xs[:n_context_frames].clone()
         curr_frame += n_context_frames
-        self._open_access_trace()
         memory_buffers = self._build_memory_buffers(
             n_context_frames,
             batch_size,
@@ -1160,6 +1198,12 @@ class WorldMemMinecraft(DiffusionForcingBase):
             pbar.update(horizon)
 
         pbar.close()
+        self._write_cuda_memory_trace(
+            "cuda_memory_after_generation_before_decode",
+            namespace=namespace,
+            batch_idx=int(batch_idx),
+            global_batch_idx=int(global_batch_idx),
+        )
 
         # Decode predictions and ground truth
         xs_pred = self.decode_in_chunks(xs_pred[n_context_frames:].to(conditions.device))
@@ -1202,6 +1246,12 @@ class WorldMemMinecraft(DiffusionForcingBase):
             # Store results for evaluation and/or epoch-end video logging.
             self.validation_step_outputs.append((xs_pred.detach().cpu(), xs_decode.detach().cpu()))
 
+        self._write_cuda_memory_trace(
+            "cuda_memory_batch_end",
+            namespace=namespace,
+            batch_idx=int(batch_idx),
+            global_batch_idx=int(global_batch_idx),
+        )
         self._write_access_trace(
             {
                 "event": "memory_run_end",

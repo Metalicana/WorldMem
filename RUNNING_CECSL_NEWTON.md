@@ -315,6 +315,70 @@ Each run writes a JSONL access trace under:
 
 The trace records retrieval events and eviction events, including selected memory frames, FOV-overlap confidence, retained memory size, and policy-specific eviction scores where available.
 
+### WorldMem Base Memory Semantics
+
+WorldMem's base method is memory-augmented, but the reported model does not impose a fixed storage budget. During validation/test generation, it initializes `xs_pred` with the full context window, then appends each newly generated chunk to that latent history. For each next chunk it uses a short local sliding window plus `memory_condition_length` retrieved reference frames.
+
+The key distinction is:
+
+- The model does **not** attend to every past frame at once. It attends to a small retrieved set, usually `memory_condition_length=8`.
+- The candidate memory bank for the base method is effectively all previous frames. In this repo, `memory_policy=unbounded` creates no bounded buffer, so retrieval candidates default to `range(curr_frame)`.
+- Retrieval is FOV/pose based: it samples 3D points near the upcoming pose horizon, scores previous frames by FOV overlap with that future region, applies a small recency penalty, and greedily selects memory frames.
+- In the interactive API, the explicit memory arrays (`memory_latent_frames`, actions, poses, c2w, frame indices) are concatenated with newly generated frames after each call, so that path also grows memory unless an external policy prunes it.
+
+So the paper's base method is best described as **unbounded storage with bounded per-step retrieval**. The budgeted policies here bound the storage/candidate bank before WorldMem's own FOV-overlap retriever chooses the per-step reference frames.
+
+### GPU Memory Profiling
+
+To compare inference-time peak GPU memory between unbounded WorldMem and a bounded policy, use:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+FUTURE_SECONDS=60 \
+NUM_VIDEOS=1 \
+MINE_POLICY=rarity_irreplaceability \
+MINE_BUDGETS=32 \
+bash scripts/profile_worldmem_gpu_memory.sh
+```
+
+This profiles one 60s video for unbounded and one 60s video for RI b32. To profile all RI budgets:
+
+```bash
+GPU=0 \
+FUTURE_SECONDS=60 \
+NUM_VIDEOS=1 \
+MINE_POLICY=rarity_irreplaceability \
+MINE_BUDGETS=16,32,64,128 \
+bash scripts/profile_worldmem_gpu_memory.sh
+```
+
+The profiler writes a timestamped directory under:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/gpu_memory_profiles/
+```
+
+Important files:
+
+```text
+summary.csv                         # one row per profiled run
+nvidia_smi/*.csv                    # external GPU polling trace
+access_traces/*.jsonl               # WorldMem trace with PyTorch CUDA peak events
+logs/*.log                          # full command logs
+```
+
+`summary.csv` includes:
+
+- `peak_nvidia_smi_used_mib`: whole-device peak memory from `nvidia-smi`.
+- `net_peak_nvidia_smi_used_mib`: peak minus baseline at the start of the run.
+- `peak_torch_allocated_mib`: process-level PyTorch peak allocated memory.
+- `peak_torch_reserved_mib`: process-level PyTorch peak reserved/cached memory.
+
+Note: in the current validation/generation path, WorldMem keeps most generated latent history on CPU and moves only the sliding window plus retrieved reference frames to GPU. So peak GPU memory may be similar between unbounded and bounded policies; the unbounded-vs-budgeted difference can show up more strongly in candidate-bank size, CPU/RAM behavior, retrieval cost, and output quality. This profiling still gives the clean GPU-memory evidence.
+
 Local videos are saved while each batch finishes, not only at the end of a long test run. For a run named `worldmem_unbounded_60s_n30`, inspect:
 
 ```text
@@ -698,6 +762,32 @@ Interpretation for the current paper story:
 - The unbounded run degrades sharply with horizon (`60s - 10s = 2224.817`), while RI/SLAM remain much flatter. This supports the story that unbounded memory can accumulate harmful or conflicting retrieval candidates during long generation.
 - This is FVD evidence only. Use CUT3R trajectory metrics, revisit consistency, and qualitative grids before making the stronger claim that bounded memory is generally better.
 
+Observed CECSL FVD prefix results for the MemCam-matched 60s budget grid, first 15 videos per run, from `/data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix_60s_n15/summary.csv` on 2026-07-16. Lower is better.
+
+| Run | FVD@10s | FVD@20s | FVD@30s | FVD@60s | Gap vs unbounded @60s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `worldmem_slam_covisibility_b16_60s_n30` | 1175.593 | 1086.814 | 1110.516 | 1041.757 | -2035.843 |
+| `worldmem_slam_covisibility_b32_60s_n30` | 1179.954 | 1064.023 | 1048.373 | 1116.925 | -1960.675 |
+| `worldmem_slam_covisibility_b64_60s_n30` | 1155.894 | 1125.879 | 1123.141 | 1128.462 | -1949.138 |
+| `worldmem_rarity_irreplaceability_b32_60s_n30` | 1137.080 | 1085.518 | 1089.522 | 1160.428 | -1917.172 |
+| `worldmem_rarity_irreplaceability_b64_60s_n30` | 1140.951 | 1119.389 | 1117.093 | 1165.354 | -1912.245 |
+| `worldmem_rarity_irreplaceability_b16_60s_n30` | 1159.996 | 1138.900 | 1201.591 | 1238.744 | -1838.856 |
+| `worldmem_rarity_irreplaceability_b128_60s_n30` | 1238.575 | 1221.720 | 1174.987 | 1250.561 | -1827.039 |
+| `worldmem_slam_covisibility_b128_60s_n30` | 1254.551 | 1290.373 | 1372.669 | 1601.814 | -1475.786 |
+| `worldmem_fifo_b128_60s_n30` | 1278.413 | 1399.131 | 1665.320 | 2604.960 | -472.640 |
+| `worldmem_unbounded_60s_n30` | 1294.640 | 1376.429 | 1699.578 | 3077.600 | 0.000 |
+| `worldmem_fifo_b32_60s_n30` | 1432.371 | 2022.649 | 2373.870 | 3554.909 | 477.309 |
+| `worldmem_fifo_b64_60s_n30` | 1290.119 | 1480.887 | 1958.381 | 3821.737 | 744.137 |
+| `worldmem_fifo_b16_60s_n30` | 1327.137 | 1644.809 | 2087.115 | 4205.032 | 1127.432 |
+
+Interpretation of the 15-video all-budget FVD grid:
+
+- The FVD result matches the LPIPS result: SLAM-style covisibility and RI beat unbounded across all tested budgets at 60s.
+- The top 60s run is again `worldmem_slam_covisibility_b16_60s_n30`, with FVD `1041.757` versus unbounded `3077.600`, a gap of `-2035.843`.
+- SLAM b16/b32/b64 are the top three by FVD@60s. RI b32/b64 follow closely.
+- FIFO remains the control. FIFO b128 improves over unbounded, but FIFO b16/b32/b64 are worse at 60s, so the main win is not simply from bounding memory.
+- As with LPIPS, b128 is not best for the selective policies. Smaller budgets can be cleaner because they remove stale or conflicting candidates before WorldMem's FOV retriever makes its local selection.
+
 To compute LPIPS prefix curves on the same saved videos:
 
 ```bash
@@ -753,6 +843,47 @@ Interpretation:
 - The gap opens with horizon. By 60s, RI/SLAM-style policies are about 0.09 to 0.10 LPIPS better than unbounded.
 - FIFO again acts as a negative control: it is worse than unbounded at 30s/60s. The gain is from selective retention, not merely bounding memory.
 - These numbers should not be compared directly to WorldMem's paper LPIPS (`0.1429`) because the paper uses its internal 10s eval path, while this is post-hoc MP4-vs-raw-GT evaluation. The policy comparison here is still apples-to-apples.
+
+Observed CECSL LPIPS prefix results for the MemCam-matched 60s budget grid, first 15 videos per run, from `/data/ab575577/worldmem/outputs/memory_policy/metrics/lpips_prefix_60s_n15/summary.csv` on 2026-07-16. Lower is better.
+
+| Run | LPIPS@10s | LPIPS@20s | LPIPS@30s | LPIPS@60s | Gap vs unbounded @60s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `worldmem_slam_covisibility_b16_60s_n30` | 0.495760 | 0.514547 | 0.535107 | 0.524506 | -0.127763 |
+| `worldmem_slam_covisibility_b32_60s_n30` | 0.496085 | 0.517781 | 0.543519 | 0.533678 | -0.118591 |
+| `worldmem_slam_covisibility_b64_60s_n30` | 0.495189 | 0.527610 | 0.548124 | 0.545439 | -0.106830 |
+| `worldmem_rarity_irreplaceability_b32_60s_n30` | 0.492754 | 0.527723 | 0.550394 | 0.545953 | -0.106316 |
+| `worldmem_rarity_irreplaceability_b64_60s_n30` | 0.498620 | 0.535419 | 0.555312 | 0.548573 | -0.103696 |
+| `worldmem_rarity_irreplaceability_b16_60s_n30` | 0.500104 | 0.534284 | 0.560150 | 0.565720 | -0.086549 |
+| `worldmem_rarity_irreplaceability_b128_60s_n30` | 0.497253 | 0.536124 | 0.558436 | 0.566730 | -0.085539 |
+| `worldmem_slam_covisibility_b128_60s_n30` | 0.500675 | 0.543008 | 0.571432 | 0.577360 | -0.074909 |
+| `worldmem_fifo_b128_60s_n30` | 0.501106 | 0.559536 | 0.595753 | 0.647241 | -0.005028 |
+| `worldmem_unbounded_60s_n30` | 0.505903 | 0.568854 | 0.601760 | 0.652269 | 0.000000 |
+| `worldmem_fifo_b64_60s_n30` | 0.507510 | 0.559912 | 0.602527 | 0.687605 | 0.035336 |
+| `worldmem_fifo_b32_60s_n30` | 0.523885 | 0.576564 | 0.612585 | 0.688773 | 0.036504 |
+| `worldmem_fifo_b16_60s_n30` | 0.518241 | 0.563879 | 0.607389 | 0.717445 | 0.065176 |
+
+Interpretation of the 15-video all-budget LPIPS grid:
+
+- Every selective bounded-memory policy, RI and SLAM-style covisibility at budgets 16/32/64/128, beats unbounded at every prefix from 10s through 60s.
+- The strongest 60s run is `worldmem_slam_covisibility_b16_60s_n30`: LPIPS `0.524506`, an absolute improvement of `0.127763` over unbounded (`0.652269`), about a 19.6% relative reduction.
+- SLAM-style covisibility is strongest in this WorldMem grid, especially at budgets 16 and 32. RI remains consistently better than unbounded, with b32/b64 closest to SLAM.
+- FIFO stays useful as a negative control. FIFO b128 nearly ties unbounded at 60s, but FIFO b16/b32/b64 are worse at 60s. This supports the claim that selective retention matters, not merely imposing a smaller memory cap.
+- Bigger budget is not automatically better. For SLAM and RI, b128 is worse than smaller budgets, which matches the hypothesis that too many retained frames can reintroduce confusing or conflicting retrieval candidates.
+
+Local plots for the all-budget 60s/15-video grid are generated from the pasted CECSL summary tables by:
+
+```bash
+python utils/plot_worldmem_memory_policy_metrics.py
+```
+
+Outputs:
+
+```text
+assets/plots/worldmem_lpips_prefix_60s_n15.png
+assets/plots/worldmem_lpips_prefix_60s_n15.pdf
+assets/plots/worldmem_fvd_prefix_60s_n15.png
+assets/plots/worldmem_fvd_prefix_60s_n15.pdf
+```
 
 For CUT3R camera trajectory metrics, use the MemCam/CUT3R checkout and checkpoint. Start with a smoke subset:
 

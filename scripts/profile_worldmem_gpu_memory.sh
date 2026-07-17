@@ -46,7 +46,7 @@ echo "Mine budgets: $MINE_BUDGETS"
 echo
 
 cat > "$SUMMARY_CSV" <<'CSV'
-run_name,policy,budget,future_seconds,num_videos,status,baseline_nvidia_smi_used_mib,peak_nvidia_smi_used_mib,net_peak_nvidia_smi_used_mib,peak_nvidia_smi_util_percent,peak_torch_allocated_mib,peak_torch_reserved_mib,output_dir,trace_path,nvidia_smi_log,run_log
+run_name,policy,budget,future_seconds,num_videos,status,wall_seconds,baseline_nvidia_smi_used_mib,peak_nvidia_smi_used_mib,net_peak_nvidia_smi_used_mib,peak_nvidia_smi_util_percent,peak_torch_allocated_mib,peak_torch_reserved_mib,output_dir,trace_path,nvidia_smi_log,run_log
 CSV
 
 SAMPLER_PID=""
@@ -167,6 +167,8 @@ run_profile() {
   cleanup_sampler
   start_sampler "$gpu_log"
 
+  local start_epoch
+  start_epoch="$(date +%s)"
   set +e
   if [ -n "$budget" ]; then
     GPU="$GPU" \
@@ -221,6 +223,10 @@ run_profile() {
   fi
   local status="${PIPESTATUS[0]}"
   set -e
+  local end_epoch
+  local wall_seconds
+  end_epoch="$(date +%s)"
+  wall_seconds=$((end_epoch - start_epoch))
 
   cleanup_sampler
 
@@ -231,13 +237,14 @@ run_profile() {
   IFS=',' read -r baseline_used peak_used net_peak_used peak_util <<< "$nvidia_summary"
   IFS=',' read -r peak_torch_allocated peak_torch_reserved <<< "$torch_summary"
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$run_name" \
     "$policy" \
     "${budget:-}" \
     "$FUTURE_SECONDS" \
     "$NUM_VIDEOS" \
     "$status" \
+    "$wall_seconds" \
     "$baseline_used" \
     "$peak_used" \
     "$net_peak_used" \

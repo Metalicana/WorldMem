@@ -381,6 +381,19 @@ logs/*.log                          # full command logs
 
 Note: in the current validation/generation path, WorldMem keeps most generated latent history on CPU and moves only the sliding window plus retrieved reference frames to GPU. So peak GPU memory may be similar between unbounded and bounded policies; the unbounded-vs-budgeted difference can show up more strongly in candidate-bank size, CPU/RAM behavior, retrieval cost, and output quality. This profiling still gives the clean GPU-memory evidence.
 
+Observed CECSL CPU-bank GPU-memory profile for one 60s video on GPU 0, from `/data/ab575577/worldmem/outputs/memory_policy/gpu_memory_profiles/2026-07-17_134759/summary.csv` on 2026-07-17:
+
+| Run | Policy | Budget | Peak `nvidia-smi` MiB | Net peak MiB | Peak PyTorch allocated MiB | Peak PyTorch reserved MiB | Status |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `worldmem_gpu_profile_unbounded_60s_n1` | unbounded | | 10921.000 | 10906.000 | 9640.697 | 10204.000 | 0 |
+| `worldmem_gpu_profile_rarity_irreplaceability_b32_60s_n1` | RI | 32 | 10921.000 | 10906.000 | 9640.697 | 10204.000 | 0 |
+
+Interpretation:
+
+- Current WorldMem validation uses a CPU-resident latent/history bank, so unbounded does **not** grow GPU memory in this released path.
+- RI b32 and unbounded have identical peak GPU memory for this run because both send only the active sliding window plus `memory_condition_length=8` retrieved references to GPU.
+- The useful claim is therefore not "unbounded OOMs GPU in the released implementation." The useful claim is: unbounded avoids GPU growth by CPU offloading, while bounded memory allows a GPU-resident bank with constant memory. The Pareto analysis should compare CPU-bank and GPU-bank variants using latency, peak GPU memory, and quality.
+
 Local videos are saved while each batch finishes, not only at the end of a long test run. For a run named `worldmem_unbounded_60s_n30`, inspect:
 
 ```text

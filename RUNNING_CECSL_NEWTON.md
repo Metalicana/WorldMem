@@ -489,6 +489,22 @@ assets/plots/worldmem_memory_bank_pareto_combined_60s.png
 assets/plots/worldmem_memory_bank_pareto_combined_60s.pdf
 ```
 
+Speculative duration-scaling plot:
+
+```bash
+python utils/plot_worldmem_speculative_gpu_scaling.py
+```
+
+Outputs:
+
+```text
+assets/plots/worldmem_speculative_peak_gpu_scaling.png
+assets/plots/worldmem_speculative_peak_gpu_scaling.pdf
+assets/plots/worldmem_speculative_peak_gpu_scaling.csv
+```
+
+This plot uses the measured CECSL 10s and 60s profile anchors, then extrapolates a fitted model peak plus resident-bank size out to 180s. It shows two things at once: WorldMem's actual latent bank is tiny relative to the model peak, but an unbounded GPU-resident bank still grows with horizon while RI b32 stays capped. The RGB curves are speculative what-if variants, not measured WorldMem behavior.
+
 Local videos are saved while each batch finishes, not only at the end of a long test run. For a run named `worldmem_unbounded_60s_n30`, inspect:
 
 ```text

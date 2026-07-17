@@ -396,6 +396,49 @@ Interpretation:
 
 Latency note: the original retrieval code computed FOV overlap for all previous frames and then masked to the bounded candidates. That made bounded policies pay most of the unbounded retrieval cost. The current local code changes `_generate_condition_indices` so bounded policies score only their retained candidate union, while unbounded still scores all previous frames. New profiler runs also write `wall_seconds`, `total_seconds`, `retrieval_seconds`, `sampling_seconds`, `memory_update_seconds`, and `decode_seconds` to `summary.csv`.
 
+Observed CECSL optimized CPU-bank latency profile for one 60s video on GPU 0, from `/data/ab575577/worldmem/outputs/memory_policy/gpu_memory_profiles/2026-07-17_142116/summary.csv` on 2026-07-17:
+
+| Run | Policy | Budget | Wall sec | Total sec | Retrieval sec | Sampling sec | Decode sec | Peak `nvidia-smi` MiB | Peak PyTorch allocated MiB | Status |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `worldmem_gpu_profile_unbounded_60s_n1` | unbounded | | 745 | 730.193 | 43.691 | 677.146 | 0.915 | 10921.000 | 9640.697 | 0 |
+| `worldmem_gpu_profile_rarity_irreplaceability_b32_60s_n1` | RI | 32 | 718 | 703.340 | 3.280 | 689.320 | 0.918 | 10915.000 | 9640.697 | 0 |
+
+Interpretation:
+
+- In CPU-bank mode, RI b32 has essentially the same peak GPU memory as unbounded (`10915` vs `10921` MiB) but lower wall time (`718s` vs `745s`).
+- Retrieval time drops from `43.691s` to `3.280s`, about a 13.3x retrieval speedup and `40.411s` saved inside retrieval.
+- End-to-end wall time improves by `27s`, about 3.6%, while total traced runtime improves by `26.853s`.
+- Sampling still dominates runtime (`~677-689s`), so retrieval savings do not translate one-for-one into wall-clock speed. The defensible CPU-bank systems claim is: RI improves quality, keeps GPU peak unchanged, and reduces retrieval overhead enough to improve total latency modestly.
+
+For the full CPU-bank versus GPU-bank Pareto profile:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+FUTURE_SECONDS=60 \
+NUM_VIDEOS=1 \
+MINE_POLICY=rarity_irreplaceability \
+MINE_BUDGETS=32 \
+MEMORY_BANK_DEVICES=cpu,gpu \
+LOG_VIDEO=false \
+bash scripts/profile_worldmem_gpu_memory.sh
+```
+
+This runs four points:
+
+```text
+cpu-bank unbounded
+cpu-bank RI b32
+gpu-bank unbounded
+gpu-bank RI b32
+```
+
+The GPU-bank mode is an analysis variant controlled by `+algorithm.memory_bank_device=gpu`. It keeps the full generated output/history on CPU for decoding, while keeping a separate retrieval/reference bank on GPU. For unbounded, that GPU bank grows with the horizon; for budgeted policies, that GPU bank is capped by the memory budget.
+
+The resulting `summary.csv` includes `memory_bank_device`, `peak_bank_mib`, and `peak_bank_frames` in addition to latency and peak GPU-memory columns. For the Pareto plot, use `wall_seconds` or `total_seconds` on X and `peak_nvidia_smi_used_mib` or `peak_torch_allocated_mib` on Y; use `peak_bank_mib` to show the actual resident-bank growth.
+
 Local videos are saved while each batch finishes, not only at the end of a long test run. For a run named `worldmem_unbounded_60s_n30`, inspect:
 
 ```text

@@ -375,6 +375,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.access_trace_path = getattr(cfg, "access_trace_path", None)
         self.profile_cuda_memory = getattr(cfg, "profile_cuda_memory", False)
         self.profile_timing = getattr(cfg, "profile_timing", self.profile_cuda_memory)
+        self.memory_bank_device = getattr(cfg, "memory_bank_device", "cpu")
+        if self.memory_bank_device not in {"cpu", "gpu"}:
+            raise ValueError("memory_bank_device must be either 'cpu' or 'gpu'")
+        if self.memory_bank_device == "gpu" and not torch.cuda.is_available():
+            raise ValueError("memory_bank_device='gpu' requires CUDA")
         if self.memory_policy in BUDGETED_MEMORY_POLICIES and self.memory_budget is None:
             raise ValueError(f"{self.memory_policy} memory policy requires +algorithm.memory_budget=<int>")
         self._access_trace_handle = None
@@ -643,6 +648,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         payload = {
             "memory_policy": self.memory_policy,
             "memory_budget": self.memory_budget,
+            "memory_bank_device": self.memory_bank_device,
             **payload,
         }
         if self._current_global_batch_idx is not None and "global_batch_idx" not in payload:
@@ -817,6 +823,71 @@ class WorldMemMinecraft(DiffusionForcingBase):
         if memory_buffers is None:
             return None
         return [memory_buffers[batch_index].candidates() for batch_index in range(batch_size)]
+
+    def _gpu_memory_bank_target_frames(self, memory_buffers, end_frame):
+        if memory_buffers is None:
+            return list(range(int(end_frame)))
+
+        target_frames = set()
+        for buffer in memory_buffers:
+            target_frames.update(buffer.candidates())
+        return sorted(target_frames)
+
+    def _gpu_memory_bank_mib(self, gpu_memory_bank):
+        if not gpu_memory_bank:
+            return 0.0
+        total_bytes = sum(tensor.numel() * tensor.element_size() for tensor in gpu_memory_bank.values())
+        return float(total_bytes / (1024**2))
+
+    def _sync_gpu_memory_bank(self, gpu_memory_bank, xs_pred, memory_buffers, end_frame, phase):
+        if self.memory_bank_device != "gpu":
+            return None
+
+        if gpu_memory_bank is None:
+            gpu_memory_bank = {}
+
+        target_frames = self._gpu_memory_bank_target_frames(memory_buffers, end_frame)
+        target_set = set(target_frames)
+
+        for frame_idx in list(gpu_memory_bank.keys()):
+            if frame_idx not in target_set:
+                gpu_memory_bank.pop(frame_idx, None)
+
+        device = self.device
+        for frame_idx in target_frames:
+            if frame_idx < 0 or frame_idx >= xs_pred.shape[0]:
+                continue
+            if frame_idx not in gpu_memory_bank:
+                gpu_memory_bank[frame_idx] = xs_pred[frame_idx].detach().to(device, non_blocking=True).clone()
+
+        self._write_access_trace(
+            {
+                "event": "gpu_memory_bank_sync",
+                "phase": phase,
+                "memory_bank_device": self.memory_bank_device,
+                "stored_memory_size": int(len(gpu_memory_bank)),
+                "target_memory_size": int(len(target_frames)),
+                "estimated_bank_mib": self._gpu_memory_bank_mib(gpu_memory_bank),
+            }
+        )
+        return gpu_memory_bank
+
+    def _gather_gpu_memory_references(self, gpu_memory_bank, random_idx, xs_pred, device):
+        if gpu_memory_bank is None:
+            return None
+
+        refs = []
+        batch_size = random_idx.shape[1]
+        for slot_idx in range(random_idx.shape[0]):
+            batch_refs = []
+            for batch_index in range(batch_size):
+                frame_idx = int(random_idx[slot_idx, batch_index].item())
+                latent = gpu_memory_bank.get(frame_idx)
+                if latent is None:
+                    latent = xs_pred[frame_idx].detach().to(device, non_blocking=True)
+                batch_refs.append(latent[batch_index])
+            refs.append(torch.stack(batch_refs, dim=0))
+        return torch.stack(refs, dim=0)
 
     def _record_retrieval_trace(self, memory_buffers):
         for record in self._last_retrieval_trace:
@@ -1145,12 +1216,20 @@ class WorldMemMinecraft(DiffusionForcingBase):
             c2w_mat,
             xs_pred,
         )
+        gpu_memory_bank = self._sync_gpu_memory_bank(
+            None,
+            xs_pred,
+            memory_buffers,
+            curr_frame,
+            phase="initial_context",
+        )
         self._write_access_trace(
             {
                 "event": "memory_run_start",
                 "namespace": namespace,
                 "batch_idx": int(batch_idx),
                 "global_batch_idx": int(global_batch_idx),
+                "memory_bank_device": self.memory_bank_device,
                 "n_frames": int(n_frames),
                 "context_frames": int(n_context_frames),
                 "memory_condition_length": int(memory_condition_length),
@@ -1177,6 +1256,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             pbar.set_postfix({"start": start_frame, "end": curr_frame + horizon})
 
             # Handle condition similarity logic
+            memory_refs_gpu = None
             if memory_condition_length:
                 candidate_indices = self._memory_candidate_lists(memory_buffers, batch_size)
                 if self.profile_timing:
@@ -1196,7 +1276,15 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     self._sync_cuda_if_needed()
                     timing["retrieval_seconds"] += time.perf_counter() - section_start
 
-                xs_pred = torch.cat([xs_pred, xs_pred[random_idx[:, range(xs_pred.shape[1])], range(xs_pred.shape[1])].clone()], 0)
+                if self.memory_bank_device == "gpu":
+                    memory_refs_gpu = self._gather_gpu_memory_references(
+                        gpu_memory_bank,
+                        random_idx,
+                        xs_pred,
+                        device=conditions.device,
+                    )
+                else:
+                    xs_pred = torch.cat([xs_pred, xs_pred[random_idx[:, range(xs_pred.shape[1])], range(xs_pred.shape[1])].clone()], 0)
 
             # Prepare input conditions and pose conditions
             input_condition, input_pose_condition, frame_idx_list = self._prepare_conditions(
@@ -1213,29 +1301,56 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     scheduling_matrix, m, curr_frame, batch_size, memory_condition_length
                 )
 
-                xs_pred[start_frame:] = self.diffusion_model.sample_step(
-                    xs_pred[start_frame:].to(input_condition.device),
-                    input_condition,
-                    input_pose_condition,
-                    from_noise_levels[start_frame:],
-                    to_noise_levels[start_frame:],
-                    current_frame=curr_frame,
-                    mode="validation",
-                    reference_length=memory_condition_length,
-                    frame_idx=frame_idx_list
-                ).cpu()
+                if memory_refs_gpu is not None:
+                    if m == 0:
+                        sample_state = torch.cat(
+                            [xs_pred[start_frame:].to(input_condition.device), memory_refs_gpu],
+                            dim=0,
+                        )
+                    sample_state = self.diffusion_model.sample_step(
+                        sample_state,
+                        input_condition,
+                        input_pose_condition,
+                        from_noise_levels[start_frame:],
+                        to_noise_levels[start_frame:],
+                        current_frame=curr_frame,
+                        mode="validation",
+                        reference_length=memory_condition_length,
+                        frame_idx=frame_idx_list
+                    )
+                else:
+                    xs_pred[start_frame:] = self.diffusion_model.sample_step(
+                        xs_pred[start_frame:].to(input_condition.device),
+                        input_condition,
+                        input_pose_condition,
+                        from_noise_levels[start_frame:],
+                        to_noise_levels[start_frame:],
+                        current_frame=curr_frame,
+                        mode="validation",
+                        reference_length=memory_condition_length,
+                        frame_idx=frame_idx_list
+                    ).cpu()
+            if memory_refs_gpu is not None:
+                xs_pred[start_frame:] = sample_state[:-memory_condition_length].cpu()
             if self.profile_timing:
                 self._sync_cuda_if_needed()
                 timing["sampling_seconds"] += time.perf_counter() - section_start
 
             # Remove condition similarity frames if applicable
-            if memory_condition_length:
+            if memory_condition_length and memory_refs_gpu is None:
                 xs_pred = xs_pred[:-memory_condition_length]
 
             if self.profile_timing:
                 self._sync_cuda_if_needed()
                 section_start = time.perf_counter()
             self._update_memory_buffers(memory_buffers, curr_frame, horizon, c2w_mat, xs_pred)
+            gpu_memory_bank = self._sync_gpu_memory_bank(
+                gpu_memory_bank,
+                xs_pred,
+                memory_buffers,
+                curr_frame + horizon,
+                phase="generation",
+            )
             if self.profile_timing:
                 self._sync_cuda_if_needed()
                 timing["memory_update_seconds"] += time.perf_counter() - section_start

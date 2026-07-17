@@ -15,6 +15,7 @@ fi
 
 MEMORY_POLICY="${MEMORY_POLICY:-unbounded}"
 MEMORY_BUDGET="${MEMORY_BUDGET:-}"
+MEMORY_BANK_DEVICE="${MEMORY_BANK_DEVICE:-cpu}"
 LIMIT_BATCH="${LIMIT_BATCH:-${NUM_VIDEOS:-1}}"
 REQUESTED_LIMIT_BATCH="$LIMIT_BATCH"
 FPS="${FPS:-10}"
@@ -172,6 +173,7 @@ cmd=(
   wandb.mode="$WANDB_MODE"
   wandb.entity=local
   +algorithm.memory_policy="$MEMORY_POLICY"
+  +algorithm.memory_bank_device="$MEMORY_BANK_DEVICE"
   +algorithm.access_trace_path="$TRACE_PATH"
   +output_dir="$OUTPUT_DIR"
 )
@@ -185,6 +187,7 @@ echo "Storage root: $STORAGE_ROOT"
 echo "Data dir: $DATA_DIR"
 echo "Memory policy: $MEMORY_POLICY"
 echo "Memory budget: ${MEMORY_BUDGET:-none}"
+echo "Memory bank device: $MEMORY_BANK_DEVICE"
 echo "Future seconds: ${FUTURE_SECONDS:-derived-from-N_FRAMES_VALID}"
 echo "Context frames: $CONTEXT_FRAMES"
 echo "N frames valid: $N_FRAMES_VALID"

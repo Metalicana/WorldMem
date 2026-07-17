@@ -22,6 +22,7 @@ DECODE_CHUNK_SIZE="${DECODE_CHUNK_SIZE:-32}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-1}"
 MINE_POLICY="${MINE_POLICY:-rarity_irreplaceability}"
 MINE_BUDGETS="${MINE_BUDGETS:-32}"
+MEMORY_BANK_DEVICES="${MEMORY_BANK_DEVICES:-cpu}"
 SAVE_LOCAL_PER_BATCH="${SAVE_LOCAL_PER_BATCH:-false}"
 LOG_VIDEO="${LOG_VIDEO:-false}"
 PROFILE_ROOT="${PROFILE_ROOT:-$STORAGE_ROOT/outputs/memory_policy/gpu_memory_profiles/$(date +%F_%H%M%S)}"
@@ -43,10 +44,11 @@ echo "Future seconds: $FUTURE_SECONDS"
 echo "Videos per run: $NUM_VIDEOS"
 echo "Mine policy: $MINE_POLICY"
 echo "Mine budgets: $MINE_BUDGETS"
+echo "Memory bank devices: $MEMORY_BANK_DEVICES"
 echo
 
 cat > "$SUMMARY_CSV" <<'CSV'
-run_name,policy,budget,future_seconds,num_videos,status,wall_seconds,total_seconds,retrieval_seconds,sampling_seconds,memory_update_seconds,decode_seconds,baseline_nvidia_smi_used_mib,peak_nvidia_smi_used_mib,net_peak_nvidia_smi_used_mib,peak_nvidia_smi_util_percent,peak_torch_allocated_mib,peak_torch_reserved_mib,output_dir,trace_path,nvidia_smi_log,run_log
+run_name,policy,budget,memory_bank_device,future_seconds,num_videos,status,wall_seconds,total_seconds,retrieval_seconds,sampling_seconds,memory_update_seconds,decode_seconds,peak_bank_mib,peak_bank_frames,baseline_nvidia_smi_used_mib,peak_nvidia_smi_used_mib,net_peak_nvidia_smi_used_mib,peak_nvidia_smi_util_percent,peak_torch_allocated_mib,peak_torch_reserved_mib,output_dir,trace_path,nvidia_smi_log,run_log
 CSV
 
 SAMPLER_PID=""
@@ -172,15 +174,49 @@ print(",".join(fmt(values[key]) for key in keys))
 PY
 }
 
+summarize_bank_log() {
+  local trace_path="$1"
+  python - "$trace_path" <<'PY'
+import json
+import math
+import sys
+
+path = sys.argv[1]
+peak_mib = math.nan
+peak_frames = 0
+try:
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("event") != "gpu_memory_bank_sync":
+                continue
+            mib = record.get("estimated_bank_mib")
+            frames = record.get("stored_memory_size")
+            if mib is not None:
+                peak_mib = max(peak_mib, float(mib)) if not math.isnan(peak_mib) else float(mib)
+            if frames is not None:
+                peak_frames = max(peak_frames, int(frames))
+except FileNotFoundError:
+    pass
+
+peak_mib_text = "nan" if math.isnan(peak_mib) else f"{peak_mib:.3f}"
+print(f"{peak_mib_text},{peak_frames}")
+PY
+}
+
 run_profile() {
   local policy="$1"
   local budget="$2"
+  local bank_device="$3"
   local run_name
 
   if [ -n "$budget" ]; then
-    run_name="worldmem_gpu_profile_${policy}_b${budget}_${FUTURE_SECONDS}s_n${NUM_VIDEOS}"
+    run_name="worldmem_gpu_profile_${bank_device}_bank_${policy}_b${budget}_${FUTURE_SECONDS}s_n${NUM_VIDEOS}"
   else
-    run_name="worldmem_gpu_profile_${policy}_${FUTURE_SECONDS}s_n${NUM_VIDEOS}"
+    run_name="worldmem_gpu_profile_${bank_device}_bank_${policy}_${FUTURE_SECONDS}s_n${NUM_VIDEOS}"
   fi
 
   local output_dir="$PROFILE_ROOT/runs/$run_name"
@@ -192,6 +228,7 @@ run_profile() {
   echo "Profiling: $run_name"
   echo "Policy: $policy"
   echo "Budget: ${budget:-none}"
+  echo "Memory bank device: $bank_device"
   echo "GPU log: $gpu_log"
   echo "Trace: $trace_path"
   echo "============================================================"
@@ -208,6 +245,7 @@ run_profile() {
     WORLDMEM_STORAGE_ROOT="$STORAGE_ROOT" \
     MEMORY_POLICY="$policy" \
     MEMORY_BUDGET="$budget" \
+    MEMORY_BANK_DEVICE="$bank_device" \
     FUTURE_SECONDS="$FUTURE_SECONDS" \
     NUM_VIDEOS="$NUM_VIDEOS" \
     CONTEXT_FRAMES="$CONTEXT_FRAMES" \
@@ -234,6 +272,7 @@ run_profile() {
     WORLDMEM_STORAGE_ROOT="$STORAGE_ROOT" \
     MEMORY_POLICY="$policy" \
     MEMORY_BUDGET="" \
+    MEMORY_BANK_DEVICE="$bank_device" \
     FUTURE_SECONDS="$FUTURE_SECONDS" \
     NUM_VIDEOS="$NUM_VIDEOS" \
     CONTEXT_FRAMES="$CONTEXT_FRAMES" \
@@ -267,17 +306,21 @@ run_profile() {
   local nvidia_summary
   local torch_summary
   local timing_summary
+  local bank_summary
   nvidia_summary="$(summarize_nvidia_smi_log "$gpu_log")"
   torch_summary="$(summarize_trace_log "$trace_path")"
   timing_summary="$(summarize_timing_log "$trace_path")"
+  bank_summary="$(summarize_bank_log "$trace_path")"
   IFS=',' read -r baseline_used peak_used net_peak_used peak_util <<< "$nvidia_summary"
   IFS=',' read -r peak_torch_allocated peak_torch_reserved <<< "$torch_summary"
   IFS=',' read -r total_seconds retrieval_seconds sampling_seconds memory_update_seconds decode_seconds <<< "$timing_summary"
+  IFS=',' read -r peak_bank_mib peak_bank_frames <<< "$bank_summary"
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$run_name" \
     "$policy" \
     "${budget:-}" \
+    "$bank_device" \
     "$FUTURE_SECONDS" \
     "$NUM_VIDEOS" \
     "$status" \
@@ -287,6 +330,8 @@ run_profile() {
     "$sampling_seconds" \
     "$memory_update_seconds" \
     "$decode_seconds" \
+    "$peak_bank_mib" \
+    "$peak_bank_frames" \
     "$baseline_used" \
     "$peak_used" \
     "$net_peak_used" \
@@ -306,13 +351,20 @@ run_profile() {
   return "$status"
 }
 
-run_profile "unbounded" ""
-
+IFS=',' read -r -a BANK_DEVICE_ARRAY <<< "$MEMORY_BANK_DEVICES"
 IFS=',' read -r -a BUDGET_ARRAY <<< "$MINE_BUDGETS"
-for budget in "${BUDGET_ARRAY[@]}"; do
-  budget="${budget//[[:space:]]/}"
-  [ -n "$budget" ] || continue
-  run_profile "$MINE_POLICY" "$budget"
+
+for bank_device in "${BANK_DEVICE_ARRAY[@]}"; do
+  bank_device="${bank_device//[[:space:]]/}"
+  [ -n "$bank_device" ] || continue
+
+  run_profile "unbounded" "" "$bank_device"
+
+  for budget in "${BUDGET_ARRAY[@]}"; do
+    budget="${budget//[[:space:]]/}"
+    [ -n "$budget" ] || continue
+    run_profile "$MINE_POLICY" "$budget" "$bank_device"
+  done
 done
 
 echo "Wrote summary: $SUMMARY_CSV"

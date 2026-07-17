@@ -394,6 +394,8 @@ Interpretation:
 - RI b32 and unbounded have identical peak GPU memory for this run because both send only the active sliding window plus `memory_condition_length=8` retrieved references to GPU.
 - The useful claim is therefore not "unbounded OOMs GPU in the released implementation." The useful claim is: unbounded avoids GPU growth by CPU offloading, while bounded memory allows a GPU-resident bank with constant memory. The Pareto analysis should compare CPU-bank and GPU-bank variants using latency, peak GPU memory, and quality.
 
+Latency note: the original retrieval code computed FOV overlap for all previous frames and then masked to the bounded candidates. That made bounded policies pay most of the unbounded retrieval cost. The current local code changes `_generate_condition_indices` so bounded policies score only their retained candidate union, while unbounded still scores all previous frames. New profiler runs also write `wall_seconds`, `total_seconds`, `retrieval_seconds`, `sampling_seconds`, `memory_update_seconds`, and `decode_seconds` to `summary.csv`.
+
 Local videos are saved while each batch finishes, not only at the end of a long test run. For a run named `worldmem_unbounded_60s_n30`, inspect:
 
 ```text

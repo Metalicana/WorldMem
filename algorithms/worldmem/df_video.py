@@ -3,6 +3,7 @@ import random
 import math
 import json
 import gc
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -373,6 +374,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.memory_budget = getattr(cfg, "memory_budget", None)
         self.access_trace_path = getattr(cfg, "access_trace_path", None)
         self.profile_cuda_memory = getattr(cfg, "profile_cuda_memory", False)
+        self.profile_timing = getattr(cfg, "profile_timing", self.profile_cuda_memory)
         if self.memory_policy in BUDGETED_MEMORY_POLICIES and self.memory_budget is None:
             raise ValueError(f"{self.memory_policy} memory policy requires +algorithm.memory_budget=<int>")
         self._access_trace_handle = None
@@ -725,6 +727,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
             }
         )
 
+    def _sync_cuda_if_needed(self):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(torch.cuda.current_device())
+
     def _pinned_memory_frames(self):
         if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
             return {0}
@@ -948,40 +954,53 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
             in_fov1 = torch.sum(in_fov1, 0) > 0
 
-            # Compute overlap ratios and select indices
-            in_fov_list = torch.stack([
-                is_inside_fov_3d_hv(points, pc[:, :3], pc[:, -2], pc[:, -1], fov_half_h, fov_half_v)
-                for pc in pose_conditions[:curr_frame]
-            ])
-
-            candidate_mask = torch.zeros((curr_frame, batch_size), dtype=torch.bool, device=pose_conditions.device)
+            candidate_lists = []
             candidate_counts = []
             candidate_fallbacks = []
             for batch_index in range(batch_size):
                 candidates = valid_candidates_for_batch(batch_index)
                 if not candidates:
                     candidates = [0]
+                candidate_lists.append(candidates)
                 candidate_counts.append(len(candidates))
                 candidate_fallbacks.append(candidates[0])
-                candidate_mask[candidates, batch_index] = True
+
+            candidate_union = sorted(set().union(*candidate_lists))
+            candidate_tensor = torch.tensor(candidate_union, dtype=torch.long, device=pose_conditions.device)
+            local_index_by_frame = {frame: idx for idx, frame in enumerate(candidate_union)}
+
+            # Compute FOV only for retained candidate frames. For unbounded memory this is
+            # still all previous frames; for budgeted policies it is capped by the policy.
+            in_fov_list = torch.stack([
+                is_inside_fov_3d_hv(points, pc[:, :3], pc[:, -2], pc[:, -1], fov_half_h, fov_half_v)
+                for pc in pose_conditions[candidate_tensor]
+            ])
+
+            candidate_mask = torch.zeros((len(candidate_union), batch_size), dtype=torch.bool, device=pose_conditions.device)
+            for batch_index, candidates in enumerate(candidate_lists):
+                local_candidates = [local_index_by_frame[int(frame)] for frame in candidates]
+                candidate_mask[local_candidates, batch_index] = True
 
             random_idx = []
             for slot_idx in range(memory_condition_length):
                 for batch_index in range(batch_size):
                     if not candidate_mask[:, batch_index].any():
-                        candidate_mask[candidate_fallbacks[batch_index], batch_index] = True
+                        candidate_mask[local_index_by_frame[candidate_fallbacks[batch_index]], batch_index] = True
 
                 denom = in_fov1.sum(0).clamp_min(1)
                 overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / denom
                 
-                confidence = overlap_ratio + (curr_frame - frame_idx[:curr_frame]) / curr_frame * (-0.2)
+                candidate_frame_idx = frame_idx[candidate_tensor]
+                confidence = overlap_ratio + (curr_frame - candidate_frame_idx) / curr_frame * (-0.2)
                 confidence = confidence.masked_fill(~candidate_mask, -1e10)
 
-                best_confidence, r_idx = torch.max(confidence, dim=0)
-                random_idx.append(r_idx.cpu())
+                best_confidence, local_r_idx = torch.max(confidence, dim=0)
+                selected_frames = candidate_tensor[local_r_idx]
+                random_idx.append(selected_frames.cpu())
                 for batch_index in range(batch_size):
-                    selected_frame = int(r_idx[batch_index].item())
-                    selected_overlap = float(overlap_ratio[selected_frame, batch_index].detach().cpu().item())
+                    selected_frame = int(selected_frames[batch_index].item())
+                    local_selected_idx = int(local_r_idx[batch_index].item())
+                    selected_overlap = float(overlap_ratio[local_selected_idx, batch_index].detach().cpu().item())
                     selected_confidence = float(best_confidence[batch_index].detach().cpu().item())
                     self._last_retrieval_trace.append(
                         {
@@ -998,11 +1017,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
                             "fallback_reason": None,
                         }
                     )
-                    candidate_mask[selected_frame, batch_index] = False
+                    candidate_mask[local_selected_idx, batch_index] = False
 
                 # choice 1: directly remove overlapping region
                 batch_arange = torch.arange(batch_size, device=pose_conditions.device)
-                occupied_mask = in_fov_list[r_idx, :, batch_arange].permute(1, 0)
+                occupied_mask = in_fov_list[local_r_idx, :, batch_arange].permute(1, 0)
                 in_fov1 = in_fov1 & ~occupied_mask
 
                 # choice 2: apply similarity filter 
@@ -1081,6 +1100,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
         """
         global_batch_idx = int(batch_idx) + self.output_batch_offset
         self._current_global_batch_idx = global_batch_idx
+        run_start_time = time.perf_counter()
+        timing = {
+            "retrieval_seconds": 0.0,
+            "sampling_seconds": 0.0,
+            "memory_update_seconds": 0.0,
+            "decode_seconds": 0.0,
+            "chunks": 0,
+        }
         self._open_access_trace()
         self._reset_cuda_memory_peak()
         self._write_cuda_memory_trace(
@@ -1152,6 +1179,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
             # Handle condition similarity logic
             if memory_condition_length:
                 candidate_indices = self._memory_candidate_lists(memory_buffers, batch_size)
+                if self.profile_timing:
+                    self._sync_cuda_if_needed()
+                    section_start = time.perf_counter()
                 random_idx = self._generate_condition_indices(
                     curr_frame,
                     memory_condition_length,
@@ -1162,6 +1192,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     candidate_indices=candidate_indices,
                 )
                 self._record_retrieval_trace(memory_buffers)
+                if self.profile_timing:
+                    self._sync_cuda_if_needed()
+                    timing["retrieval_seconds"] += time.perf_counter() - section_start
 
                 xs_pred = torch.cat([xs_pred, xs_pred[random_idx[:, range(xs_pred.shape[1])], range(xs_pred.shape[1])].clone()], 0)
 
@@ -1172,6 +1205,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
             )
 
             # Perform sampling for each step in the scheduling matrix
+            if self.profile_timing:
+                self._sync_cuda_if_needed()
+                section_start = time.perf_counter()
             for m in range(scheduling_matrix.shape[0] - 1):
                 from_noise_levels, to_noise_levels = self._prepare_noise_levels(
                     scheduling_matrix, m, curr_frame, batch_size, memory_condition_length
@@ -1188,12 +1224,22 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     reference_length=memory_condition_length,
                     frame_idx=frame_idx_list
                 ).cpu()
+            if self.profile_timing:
+                self._sync_cuda_if_needed()
+                timing["sampling_seconds"] += time.perf_counter() - section_start
 
             # Remove condition similarity frames if applicable
             if memory_condition_length:
                 xs_pred = xs_pred[:-memory_condition_length]
 
+            if self.profile_timing:
+                self._sync_cuda_if_needed()
+                section_start = time.perf_counter()
             self._update_memory_buffers(memory_buffers, curr_frame, horizon, c2w_mat, xs_pred)
+            if self.profile_timing:
+                self._sync_cuda_if_needed()
+                timing["memory_update_seconds"] += time.perf_counter() - section_start
+                timing["chunks"] += 1
             curr_frame += horizon
             pbar.update(horizon)
 
@@ -1206,9 +1252,15 @@ class WorldMemMinecraft(DiffusionForcingBase):
         )
 
         # Decode predictions and ground truth
+        if self.profile_timing:
+            self._sync_cuda_if_needed()
+            section_start = time.perf_counter()
         xs_pred = self.decode_in_chunks(xs_pred[n_context_frames:].to(conditions.device))
         needs_gt_decode = self.compute_eval_metrics or self.save_gt_video
         xs_decode = self.decode_in_chunks(xs[n_context_frames:].to(conditions.device)) if needs_gt_decode else None
+        if self.profile_timing:
+            self._sync_cuda_if_needed()
+            timing["decode_seconds"] += time.perf_counter() - section_start
 
         if self.save_local and self.save_local_per_batch and self.log_video:
             log_video(
@@ -1252,6 +1304,22 @@ class WorldMemMinecraft(DiffusionForcingBase):
             batch_idx=int(batch_idx),
             global_batch_idx=int(global_batch_idx),
         )
+        if self.profile_timing:
+            total_seconds = time.perf_counter() - run_start_time
+            self._write_access_trace(
+                {
+                    "event": "runtime_breakdown",
+                    "namespace": namespace,
+                    "batch_idx": int(batch_idx),
+                    "global_batch_idx": int(global_batch_idx),
+                    "total_seconds": float(total_seconds),
+                    "retrieval_seconds": float(timing["retrieval_seconds"]),
+                    "sampling_seconds": float(timing["sampling_seconds"]),
+                    "memory_update_seconds": float(timing["memory_update_seconds"]),
+                    "decode_seconds": float(timing["decode_seconds"]),
+                    "chunks": int(timing["chunks"]),
+                }
+            )
         self._write_access_trace(
             {
                 "event": "memory_run_end",

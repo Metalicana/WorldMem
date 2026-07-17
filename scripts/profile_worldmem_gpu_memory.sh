@@ -46,7 +46,7 @@ echo "Mine budgets: $MINE_BUDGETS"
 echo
 
 cat > "$SUMMARY_CSV" <<'CSV'
-run_name,policy,budget,future_seconds,num_videos,status,wall_seconds,baseline_nvidia_smi_used_mib,peak_nvidia_smi_used_mib,net_peak_nvidia_smi_used_mib,peak_nvidia_smi_util_percent,peak_torch_allocated_mib,peak_torch_reserved_mib,output_dir,trace_path,nvidia_smi_log,run_log
+run_name,policy,budget,future_seconds,num_videos,status,wall_seconds,total_seconds,retrieval_seconds,sampling_seconds,memory_update_seconds,decode_seconds,baseline_nvidia_smi_used_mib,peak_nvidia_smi_used_mib,net_peak_nvidia_smi_used_mib,peak_nvidia_smi_util_percent,peak_torch_allocated_mib,peak_torch_reserved_mib,output_dir,trace_path,nvidia_smi_log,run_log
 CSV
 
 SAMPLER_PID=""
@@ -140,6 +140,38 @@ print(f"{fmt(peak_allocated)},{fmt(peak_reserved)}")
 PY
 }
 
+summarize_timing_log() {
+  local trace_path="$1"
+  python - "$trace_path" <<'PY'
+import json
+import math
+import sys
+
+path = sys.argv[1]
+keys = ["total_seconds", "retrieval_seconds", "sampling_seconds", "memory_update_seconds", "decode_seconds"]
+values = {key: math.nan for key in keys}
+try:
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("event") != "runtime_breakdown":
+                continue
+            for key in keys:
+                if record.get(key) is not None:
+                    values[key] = float(record[key])
+except FileNotFoundError:
+    pass
+
+def fmt(value):
+    return "nan" if math.isnan(value) else f"{value:.3f}"
+
+print(",".join(fmt(values[key]) for key in keys))
+PY
+}
+
 run_profile() {
   local policy="$1"
   local budget="$2"
@@ -186,6 +218,7 @@ run_profile() {
     OUTPUT_DIR="$output_dir" \
     TRACE_PATH="$trace_path" \
     PROFILE_CUDA_MEMORY=true \
+    PROFILE_TIMING=true \
     LOG_VIDEO="$LOG_VIDEO" \
     SAVE_LOCAL_PER_BATCH="$SAVE_LOCAL_PER_BATCH" \
     SAVE_GT_VIDEO=false \
@@ -211,6 +244,7 @@ run_profile() {
     OUTPUT_DIR="$output_dir" \
     TRACE_PATH="$trace_path" \
     PROFILE_CUDA_MEMORY=true \
+    PROFILE_TIMING=true \
     LOG_VIDEO="$LOG_VIDEO" \
     SAVE_LOCAL_PER_BATCH="$SAVE_LOCAL_PER_BATCH" \
     SAVE_GT_VIDEO=false \
@@ -232,12 +266,15 @@ run_profile() {
 
   local nvidia_summary
   local torch_summary
+  local timing_summary
   nvidia_summary="$(summarize_nvidia_smi_log "$gpu_log")"
   torch_summary="$(summarize_trace_log "$trace_path")"
+  timing_summary="$(summarize_timing_log "$trace_path")"
   IFS=',' read -r baseline_used peak_used net_peak_used peak_util <<< "$nvidia_summary"
   IFS=',' read -r peak_torch_allocated peak_torch_reserved <<< "$torch_summary"
+  IFS=',' read -r total_seconds retrieval_seconds sampling_seconds memory_update_seconds decode_seconds <<< "$timing_summary"
 
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$run_name" \
     "$policy" \
     "${budget:-}" \
@@ -245,6 +282,11 @@ run_profile() {
     "$NUM_VIDEOS" \
     "$status" \
     "$wall_seconds" \
+    "$total_seconds" \
+    "$retrieval_seconds" \
+    "$sampling_seconds" \
+    "$memory_update_seconds" \
+    "$decode_seconds" \
     "$baseline_used" \
     "$peak_used" \
     "$net_peak_used" \

@@ -23,6 +23,7 @@ SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-1}"
 MINE_POLICY="${MINE_POLICY:-rarity_irreplaceability}"
 MINE_BUDGETS="${MINE_BUDGETS:-32}"
 SAVE_LOCAL_PER_BATCH="${SAVE_LOCAL_PER_BATCH:-false}"
+LOG_VIDEO="${LOG_VIDEO:-false}"
 PROFILE_ROOT="${PROFILE_ROOT:-$STORAGE_ROOT/outputs/memory_policy/gpu_memory_profiles/$(date +%F_%H%M%S)}"
 SUMMARY_CSV="$PROFILE_ROOT/summary.csv"
 
@@ -183,6 +184,7 @@ run_profile() {
     OUTPUT_DIR="$output_dir" \
     TRACE_PATH="$trace_path" \
     PROFILE_CUDA_MEMORY=true \
+    LOG_VIDEO="$LOG_VIDEO" \
     SAVE_LOCAL_PER_BATCH="$SAVE_LOCAL_PER_BATCH" \
     SAVE_GT_VIDEO=false \
     COMPUTE_EVAL_METRICS=false \
@@ -207,6 +209,7 @@ run_profile() {
     OUTPUT_DIR="$output_dir" \
     TRACE_PATH="$trace_path" \
     PROFILE_CUDA_MEMORY=true \
+    LOG_VIDEO="$LOG_VIDEO" \
     SAVE_LOCAL_PER_BATCH="$SAVE_LOCAL_PER_BATCH" \
     SAVE_GT_VIDEO=false \
     COMPUTE_EVAL_METRICS=false \

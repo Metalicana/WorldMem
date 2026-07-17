@@ -341,6 +341,7 @@ FUTURE_SECONDS=60 \
 NUM_VIDEOS=1 \
 MINE_POLICY=rarity_irreplaceability \
 MINE_BUDGETS=32 \
+LOG_VIDEO=false \
 bash scripts/profile_worldmem_gpu_memory.sh
 ```
 
@@ -352,6 +353,7 @@ FUTURE_SECONDS=60 \
 NUM_VIDEOS=1 \
 MINE_POLICY=rarity_irreplaceability \
 MINE_BUDGETS=16,32,64,128 \
+LOG_VIDEO=false \
 bash scripts/profile_worldmem_gpu_memory.sh
 ```
 

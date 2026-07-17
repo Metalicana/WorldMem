@@ -50,6 +50,7 @@ export WANDB_MODE="${WANDB_MODE:-disabled}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-0}"
 SAVE_LOCAL_PER_BATCH="${SAVE_LOCAL_PER_BATCH:-true}"
+LOG_VIDEO="${LOG_VIDEO:-true}"
 SAVE_GT_VIDEO="${SAVE_GT_VIDEO:-false}"
 COMPUTE_EVAL_METRICS="${COMPUTE_EVAL_METRICS:-false}"
 STREAM_EVAL_METRICS="${STREAM_EVAL_METRICS:-false}"
@@ -152,7 +153,7 @@ cmd=(
   +algorithm.decode_chunk_size="$DECODE_CHUNK_SIZE"
   +algorithm.memory_condition_length=8
   +algorithm.lpips_batch_size=16
-  +algorithm.log_video=true
+  +algorithm.log_video="$LOG_VIDEO"
   +algorithm.save_local=true
   +algorithm.save_local_per_batch="$SAVE_LOCAL_PER_BATCH"
   +algorithm.save_gt_video="$SAVE_GT_VIDEO"
@@ -194,6 +195,7 @@ echo "Resume-complete batch count: $COMPLETED_BATCHES"
 echo "Remaining limit batch/videos: $LIMIT_BATCH"
 echo "Dataset start index: $DATASET_START_INDEX"
 echo "Output batch offset: $OUTPUT_BATCH_OFFSET"
+echo "Log video: $LOG_VIDEO"
 echo "Save local per batch: $SAVE_LOCAL_PER_BATCH"
 echo "Save GT video: $SAVE_GT_VIDEO"
 echo "Compute eval metrics: $COMPUTE_EVAL_METRICS"

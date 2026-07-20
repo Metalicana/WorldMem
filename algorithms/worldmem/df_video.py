@@ -26,6 +26,7 @@ from .models.pose_prediction import PosePredictionNet
 from .memory_policies import (
     BUDGETED_MEMORY_POLICIES,
     FrameMemoryBuffer,
+    compute_kcenter_coreset_scores,
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
 )
@@ -376,6 +377,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.profile_cuda_memory = getattr(cfg, "profile_cuda_memory", False)
         self.profile_timing = getattr(cfg, "profile_timing", self.profile_cuda_memory)
         self.memory_bank_device = getattr(cfg, "memory_bank_device", "cpu")
+        self.kcenter_archive_stride = max(int(getattr(cfg, "kcenter_archive_stride", 1)), 1)
+        self.kcenter_visual_weight = float(getattr(cfg, "kcenter_visual_weight", 0.5))
+        self.kcenter_pose_weight = float(getattr(cfg, "kcenter_pose_weight", 0.5))
+        self.kcenter_time_weight = float(getattr(cfg, "kcenter_time_weight", 0.0))
         if self.memory_bank_device not in {"cpu", "gpu"}:
             raise ValueError("memory_bank_device must be either 'cpu' or 'gpu'")
         if self.memory_bank_device == "gpu" and not torch.cuda.is_available():
@@ -738,7 +743,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             torch.cuda.synchronize(torch.cuda.current_device())
 
     def _pinned_memory_frames(self):
-        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
+        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility", "kcenter_coreset"}:
             return {0}
         return set()
 
@@ -754,12 +759,61 @@ class WorldMemMinecraft(DiffusionForcingBase):
             features[frame_idx] = pooled[offset]
         return features
 
-    def _compute_memory_scores(self, frame_indices, c2w_mat, xs_pred, batch_index):
+    def _kcenter_archive_indices(self, end_frame):
+        end_frame = max(int(end_frame), 0)
+        if end_frame <= 0:
+            return []
+
+        archive_indices = list(range(0, end_frame, self.kcenter_archive_stride))
+        if archive_indices[-1] != end_frame - 1:
+            archive_indices.append(end_frame - 1)
+        return archive_indices
+
+    def _memory_eviction_detail_fields(self, detail):
+        return {
+            "eviction_score": detail.get("score"),
+            "eviction_rarity": detail.get("rarity"),
+            "eviction_irreplaceability": detail.get("irreplaceability"),
+            "eviction_cluster_id": detail.get("cluster_id"),
+            "eviction_cluster_size": detail.get("cluster_size"),
+            "eviction_cluster_threshold": detail.get("cluster_threshold"),
+            "eviction_nearest_frame": detail.get("nearest_frame"),
+            "eviction_nearest_distance": detail.get("nearest_distance"),
+            "eviction_redundancy_ratio": detail.get("redundancy_ratio"),
+            "eviction_covisible_observers": detail.get("covisible_observers"),
+            "eviction_max_covisibility": detail.get("max_covisibility"),
+            "eviction_nearest_covisible_frame": detail.get("nearest_covisible_frame"),
+            "eviction_marginal_contribution": detail.get("marginal_contribution"),
+            "eviction_unique_bonus": detail.get("unique_bonus"),
+            "eviction_kcenter_selected": detail.get("kcenter_selected"),
+            "eviction_kcenter_forced_keep": detail.get("kcenter_forced_keep"),
+            "eviction_kcenter_rank": detail.get("kcenter_rank"),
+            "eviction_kcenter_radius": detail.get("kcenter_radius"),
+            "eviction_kcenter_mean_radius": detail.get("kcenter_mean_radius"),
+            "eviction_kcenter_removal_radius_increase": detail.get("kcenter_removal_radius_increase"),
+            "eviction_kcenter_archive_size": detail.get("kcenter_archive_size"),
+            "eviction_kcenter_nearest_archive_frame": detail.get("kcenter_nearest_archive_frame"),
+            "eviction_kcenter_nearest_archive_distance": detail.get("kcenter_nearest_archive_distance"),
+            "eviction_kcenter_selected_for_archive_frame": detail.get("kcenter_selected_for_archive_frame"),
+            "eviction_kcenter_visual_weight": detail.get("kcenter_visual_weight"),
+            "eviction_kcenter_pose_weight": detail.get("kcenter_pose_weight"),
+            "eviction_kcenter_time_weight": detail.get("kcenter_time_weight"),
+        }
+
+    def _compute_memory_scores(self, frame_indices, c2w_mat, xs_pred, batch_index, archive_frame_indices=None):
         frame_indices = sorted({int(idx) for idx in frame_indices if 0 <= int(idx) < xs_pred.shape[0]})
         if self.memory_policy in {"unbounded", "fifo"} or not frame_indices:
             return None, {}
 
-        latent_features = self._latent_feature_dict(xs_pred, frame_indices, batch_index)
+        if archive_frame_indices is not None:
+            archive_frame_indices = sorted(
+                {int(idx) for idx in archive_frame_indices if 0 <= int(idx) < xs_pred.shape[0]}
+            )
+        feature_frame_indices = frame_indices
+        if self.memory_policy == "kcenter_coreset" and archive_frame_indices is not None:
+            feature_frame_indices = sorted(set(frame_indices) | set(archive_frame_indices))
+
+        latent_features = self._latent_feature_dict(xs_pred, feature_frame_indices, batch_index)
         pinned_frames = self._pinned_memory_frames()
 
         if self.memory_policy == "rarity_irreplaceability":
@@ -780,6 +834,21 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 return_details=True,
             )
 
+        if self.memory_policy == "kcenter_coreset":
+            c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
+            return compute_kcenter_coreset_scores(
+                memory_frame_indices=frame_indices,
+                archive_frame_indices=archive_frame_indices or frame_indices,
+                c2ws=c2ws,
+                budget=self.memory_budget,
+                pinned_frames=pinned_frames,
+                latent_features=latent_features,
+                visual_weight=self.kcenter_visual_weight,
+                pose_weight=self.kcenter_pose_weight,
+                time_weight=self.kcenter_time_weight,
+                return_details=True,
+            )
+
         return None, {}
 
     def _build_memory_buffers(self, n_context_frames, batch_size, c2w_mat, xs_pred):
@@ -795,11 +864,12 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 budget=self.memory_budget,
                 pinned_frames=self._pinned_memory_frames(),
             )
-            scores, _ = self._compute_memory_scores(
+            scores, score_details = self._compute_memory_scores(
                 initial_frames,
                 c2w_mat,
                 xs_pred,
                 batch_index,
+                archive_frame_indices=self._kcenter_archive_indices(n_context_frames),
             )
             evicted = buffer.update(
                 initial_frames,
@@ -807,6 +877,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 protected_frames=protected_frames,
             )
             for evicted_frame in evicted:
+                detail = score_details.get(evicted_frame, {})
                 self._write_access_trace(
                     {
                         "event": "memory_eviction",
@@ -814,6 +885,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                         "batch_index": batch_index,
                         "evicted_memory_frame": int(evicted_frame),
                         "stored_memory_size": len(buffer),
+                        **self._memory_eviction_detail_fields(detail),
                     }
                 )
             memory_buffers.append(buffer)
@@ -915,6 +987,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 c2w_mat,
                 xs_pred,
                 batch_index,
+                archive_frame_indices=self._kcenter_archive_indices(curr_frame + horizon),
             )
             evicted = buffer.update(
                 new_frames,
@@ -932,20 +1005,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                         "section_end_frame": int(curr_frame + horizon - 1),
                         "memory_age_at_eviction": int(curr_frame + horizon - 1 - evicted_frame),
                         "stored_memory_size": len(buffer),
-                        "eviction_score": detail.get("score"),
-                        "eviction_rarity": detail.get("rarity"),
-                        "eviction_irreplaceability": detail.get("irreplaceability"),
-                        "eviction_cluster_id": detail.get("cluster_id"),
-                        "eviction_cluster_size": detail.get("cluster_size"),
-                        "eviction_cluster_threshold": detail.get("cluster_threshold"),
-                        "eviction_nearest_frame": detail.get("nearest_frame"),
-                        "eviction_nearest_distance": detail.get("nearest_distance"),
-                        "eviction_redundancy_ratio": detail.get("redundancy_ratio"),
-                        "eviction_covisible_observers": detail.get("covisible_observers"),
-                        "eviction_max_covisibility": detail.get("max_covisibility"),
-                        "eviction_nearest_covisible_frame": detail.get("nearest_covisible_frame"),
-                        "eviction_marginal_contribution": detail.get("marginal_contribution"),
-                        "eviction_unique_bonus": detail.get("unique_bonus"),
+                        **self._memory_eviction_detail_fields(detail),
                     }
                 )
 

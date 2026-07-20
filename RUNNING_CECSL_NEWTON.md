@@ -261,6 +261,7 @@ unbounded
 fifo
 rarity_irreplaceability
 slam_covisibility
+kcenter_coreset
 ```
 
 On CECSL, run from `~/WorldMem`. If your shell has `WORLDMEM_ROOT=/data/ab575577/worldmem` from the storage setup, that is fine; the runner uses `WORLDMEM_REPO_ROOT` for the repository path and `WORLDMEM_STORAGE_ROOT` for large outputs.
@@ -288,6 +289,23 @@ SLAM-style covisibility:
 MEMORY_POLICY=slam_covisibility \
 MEMORY_BUDGET=32 \
 bash scripts/run_worldmem_memory_policy_smoke.sh
+```
+
+K-center coreset:
+
+```bash
+MEMORY_POLICY=kcenter_coreset \
+MEMORY_BUDGET=32 \
+bash scripts/run_worldmem_memory_policy_smoke.sh
+```
+
+WorldMem K-center uses pooled latent features plus pose distance by default, matching the spirit of the MemCam `kcenter_b*_dino_pose` runs while staying native to WorldMem's latent memory representation. Default weights are:
+
+```text
+KCENTER_VISUAL_WEIGHT=0.5
+KCENTER_POSE_WEIGHT=0.5
+KCENTER_TIME_WEIGHT=0.0
+KCENTER_ARCHIVE_STRIDE=1
 ```
 
 The script uses `/data/ab575577/worldmem` automatically on CECSL. On Newton, it does not assume that path; set the data and output roots explicitly if needed:
@@ -570,6 +588,47 @@ This full grid is large: 4 durations x 1 unbounded + 4 durations x 3 policies x 
 ```bash
 NUM_VIDEOS=2 DURATIONS=10 POLICIES=unbounded,fifo BUDGETS=32 \
 bash scripts/run_worldmem_memory_policy_grid.sh
+```
+
+To add the MemCam-style K-center baseline to the 60s WorldMem grid, run it explicitly so existing completed policy grids are not disturbed:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=30 \
+DURATIONS=60 \
+POLICIES=kcenter_coreset \
+BUDGETS=16,32,64,128 \
+bash scripts/run_worldmem_memory_policy_grid.sh
+```
+
+Expected run directories:
+
+```text
+worldmem_kcenter_coreset_b16_60s_n30
+worldmem_kcenter_coreset_b32_60s_n30
+worldmem_kcenter_coreset_b64_60s_n30
+worldmem_kcenter_coreset_b128_60s_n30
+```
+
+Check K-center completion:
+
+```bash
+cd /data/ab575577/worldmem/outputs/memory_policy
+
+for r in \
+  worldmem_kcenter_coreset_b16_60s_n30 \
+  worldmem_kcenter_coreset_b32_60s_n30 \
+  worldmem_kcenter_coreset_b64_60s_n30 \
+  worldmem_kcenter_coreset_b128_60s_n30
+do
+  n=$(find "$r/videos/test_vis/pred" -name '*.mp4' 2>/dev/null | wc -l)
+  if [ "$n" -ge 30 ]; then status="OK"; else status="MISSING"; fi
+  printf "%-65s %3s  %s\n" "$r" "$n" "$status"
+done
 ```
 
 ## 180s Pivot Runs

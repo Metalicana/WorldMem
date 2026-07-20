@@ -16,6 +16,10 @@ fi
 MEMORY_POLICY="${MEMORY_POLICY:-unbounded}"
 MEMORY_BUDGET="${MEMORY_BUDGET:-}"
 MEMORY_BANK_DEVICE="${MEMORY_BANK_DEVICE:-cpu}"
+KCENTER_ARCHIVE_STRIDE="${KCENTER_ARCHIVE_STRIDE:-1}"
+KCENTER_VISUAL_WEIGHT="${KCENTER_VISUAL_WEIGHT:-0.5}"
+KCENTER_POSE_WEIGHT="${KCENTER_POSE_WEIGHT:-0.5}"
+KCENTER_TIME_WEIGHT="${KCENTER_TIME_WEIGHT:-0.0}"
 LIMIT_BATCH="${LIMIT_BATCH:-${NUM_VIDEOS:-1}}"
 REQUESTED_LIMIT_BATCH="$LIMIT_BATCH"
 FPS="${FPS:-10}"
@@ -34,7 +38,7 @@ RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGE
 OUTPUT_DIR="${OUTPUT_DIR:-$STORAGE_ROOT/outputs/memory_policy/$RUN_NAME}"
 TRACE_PATH="${TRACE_PATH:-$OUTPUT_DIR/access_traces/$RUN_NAME.jsonl}"
 
-if { [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ]; } && [ -z "$MEMORY_BUDGET" ]; then
+if { [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ]; } && [ -z "$MEMORY_BUDGET" ]; then
   echo "MEMORY_BUDGET is required when MEMORY_POLICY=$MEMORY_POLICY" >&2
   exit 2
 fi
@@ -174,6 +178,10 @@ cmd=(
   wandb.entity=local
   +algorithm.memory_policy="$MEMORY_POLICY"
   +algorithm.memory_bank_device="$MEMORY_BANK_DEVICE"
+  +algorithm.kcenter_archive_stride="$KCENTER_ARCHIVE_STRIDE"
+  +algorithm.kcenter_visual_weight="$KCENTER_VISUAL_WEIGHT"
+  +algorithm.kcenter_pose_weight="$KCENTER_POSE_WEIGHT"
+  +algorithm.kcenter_time_weight="$KCENTER_TIME_WEIGHT"
   +algorithm.access_trace_path="$TRACE_PATH"
   +output_dir="$OUTPUT_DIR"
 )
@@ -188,6 +196,10 @@ echo "Data dir: $DATA_DIR"
 echo "Memory policy: $MEMORY_POLICY"
 echo "Memory budget: ${MEMORY_BUDGET:-none}"
 echo "Memory bank device: $MEMORY_BANK_DEVICE"
+echo "K-center archive stride: $KCENTER_ARCHIVE_STRIDE"
+echo "K-center visual weight: $KCENTER_VISUAL_WEIGHT"
+echo "K-center pose weight: $KCENTER_POSE_WEIGHT"
+echo "K-center time weight: $KCENTER_TIME_WEIGHT"
 echo "Future seconds: ${FUTURE_SECONDS:-derived-from-N_FRAMES_VALID}"
 echo "Context frames: $CONTEXT_FRAMES"
 echo "N frames valid: $N_FRAMES_VALID"

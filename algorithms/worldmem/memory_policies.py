@@ -9,11 +9,13 @@ SUPPORTED_MEMORY_POLICIES = (
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
+    "kcenter_coreset",
 )
 BUDGETED_MEMORY_POLICIES = (
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
+    "kcenter_coreset",
 )
 
 
@@ -280,6 +282,19 @@ def _feature_cosine_similarity(memory_frame_indices, features):
     return np.clip(feature_matrix @ feature_matrix.T, -1.0, 1.0)
 
 
+def _feature_cosine_similarity_cross(left_frame_indices, right_frame_indices, features):
+    frame_indices = set(left_frame_indices) | set(right_frame_indices)
+    missing = [idx for idx in frame_indices if idx not in features]
+    if missing:
+        raise ValueError(f"Missing memory features for frames: {missing[:10]}")
+
+    left = np.stack([features[idx] for idx in left_frame_indices])
+    right = np.stack([features[idx] for idx in right_frame_indices])
+    left = left / np.maximum(np.linalg.norm(left, axis=1, keepdims=True), 1e-12)
+    right = right / np.maximum(np.linalg.norm(right, axis=1, keepdims=True), 1e-12)
+    return np.clip(left @ right.T, -1.0, 1.0)
+
+
 def compute_slam_covisibility_scores(
     memory_frame_indices,
     c2ws,
@@ -344,6 +359,195 @@ def compute_slam_covisibility_scores(
             "unique_bonus": float(unique_bonus),
             "covisibility_threshold": float(covisibility_threshold),
             "n_other_observers": int(n_other_observers),
+        }
+
+    return (scores, details) if return_details else scores
+
+
+def compute_kcenter_coreset_scores(
+    memory_frame_indices,
+    archive_frame_indices,
+    c2ws,
+    budget,
+    pinned_frames=None,
+    latent_features=None,
+    visual_weight=0.5,
+    pose_weight=0.5,
+    time_weight=0.0,
+    return_details=False,
+):
+    """Select retained memory frames by greedy k-center coverage.
+
+    The archive is the historical trajectory to cover. The candidate memory set
+    contains frames the model can keep and retrieve. Higher returned scores mean
+    "keep"; unselected frames receive low scores and are evicted by the buffer.
+    """
+    memory_frame_indices = [int(idx) for idx in memory_frame_indices]
+    archive_frame_indices = [int(idx) for idx in archive_frame_indices]
+    pinned_frames = {int(idx) for idx in (pinned_frames or [])}
+    if budget is None:
+        raise ValueError("kcenter_coreset requires an explicit memory budget")
+    if budget <= 0:
+        raise ValueError("kcenter_coreset budget must be positive")
+    if not memory_frame_indices:
+        return ({}, {}) if return_details else {}
+    if not archive_frame_indices:
+        archive_frame_indices = list(memory_frame_indices)
+
+    use_visual = latent_features is not None and float(visual_weight) > 0.0
+    if len(memory_frame_indices) <= budget:
+        scores = {
+            frame_idx: float("inf") if frame_idx in pinned_frames else 1.0
+            for frame_idx in memory_frame_indices
+        }
+        details = {
+            frame_idx: {
+                "score": scores[frame_idx],
+                "kcenter_selected": True,
+                "kcenter_forced_keep": frame_idx in pinned_frames,
+                "kcenter_rank": index,
+                "kcenter_radius": 0.0,
+                "kcenter_mean_radius": 0.0,
+                "kcenter_removal_radius_increase": None,
+                "kcenter_archive_size": len(archive_frame_indices),
+                "kcenter_nearest_archive_frame": None,
+                "kcenter_nearest_archive_distance": None,
+                "kcenter_selected_for_archive_frame": None,
+                "kcenter_visual_weight": float(visual_weight if use_visual else 0.0),
+                "kcenter_pose_weight": float(pose_weight),
+                "kcenter_time_weight": float(time_weight),
+            }
+            for index, frame_idx in enumerate(memory_frame_indices)
+        }
+        return (scores, details) if return_details else scores
+
+    components = []
+    if use_visual:
+        visual_similarity = _feature_cosine_similarity_cross(
+            archive_frame_indices,
+            memory_frame_indices,
+            latent_features,
+        )
+        visual_distance = (1.0 - visual_similarity) / 2.0
+        visual_distance = np.clip(visual_distance, 0.0, 1.0)
+        components.append((float(visual_weight), visual_distance))
+
+    if pose_weight:
+        pose_distance = pose_distances(c2ws, archive_frame_indices, memory_frame_indices)
+        pose_distance = 1.0 - np.exp(-pose_distance)
+        components.append((float(pose_weight), pose_distance))
+
+    if time_weight:
+        archive_times = np.asarray(archive_frame_indices, dtype=np.float64)
+        memory_times = np.asarray(memory_frame_indices, dtype=np.float64)
+        time_scale = max(
+            float(max(max(archive_frame_indices), max(memory_frame_indices)) + 1),
+            1.0,
+        )
+        time_distance = np.abs(archive_times[:, None] - memory_times[None, :]) / time_scale
+        components.append((float(time_weight), time_distance))
+
+    if not components:
+        raise ValueError("kcenter_coreset needs at least one positive distance component")
+
+    total_weight = max(sum(weight for weight, _ in components), 1e-12)
+    distance = sum(weight * matrix for weight, matrix in components) / total_weight
+
+    frame_to_col = {frame_idx: col for col, frame_idx in enumerate(memory_frame_indices)}
+    forced_cols = [
+        frame_to_col[frame_idx]
+        for frame_idx in memory_frame_indices
+        if frame_idx in pinned_frames
+    ]
+
+    selected_cols = []
+    selected_set = set()
+    selected_by_archive = {}
+
+    for col in forced_cols:
+        if col not in selected_set:
+            selected_set.add(col)
+            selected_cols.append(col)
+            selected_by_archive[col] = None
+
+    if selected_cols:
+        covered_distance = np.min(distance[:, selected_cols], axis=1)
+    else:
+        first_col = int(np.argmin(np.mean(distance, axis=0)))
+        selected_set.add(first_col)
+        selected_cols.append(first_col)
+        selected_by_archive[first_col] = None
+        covered_distance = distance[:, first_col].copy()
+
+    while len(selected_cols) < min(int(budget), len(memory_frame_indices)):
+        farthest_archive_row = int(np.argmax(covered_distance))
+        candidate_order = np.argsort(distance[farthest_archive_row])
+        best_col = None
+        for col in candidate_order:
+            col = int(col)
+            if col not in selected_set:
+                best_col = col
+                break
+        if best_col is None:
+            break
+
+        selected_set.add(best_col)
+        selected_cols.append(best_col)
+        selected_by_archive[best_col] = int(archive_frame_indices[farthest_archive_row])
+        covered_distance = np.minimum(covered_distance, distance[:, best_col])
+
+    selected_frames = [memory_frame_indices[col] for col in selected_cols]
+    selected_frame_set = set(selected_frames)
+    current_radius = float(np.max(covered_distance)) if covered_distance.size else 0.0
+    mean_radius = float(np.mean(covered_distance)) if covered_distance.size else 0.0
+
+    removal_radius_increases = {}
+    for col in selected_cols:
+        other_cols = [other for other in selected_cols if other != col]
+        if other_cols:
+            without_col = np.min(distance[:, other_cols], axis=1)
+            without_radius = float(np.max(without_col))
+        else:
+            without_radius = float("inf")
+        removal_radius_increases[col] = without_radius - current_radius
+
+    scores = {}
+    details = {}
+    for col, frame_idx in enumerate(memory_frame_indices):
+        selected = frame_idx in selected_frame_set
+        forced = frame_idx in pinned_frames
+        if forced:
+            score = float("inf")
+        elif selected:
+            score = 1.0 + max(float(removal_radius_increases.get(col, 0.0)), 0.0)
+        else:
+            score = -1.0
+
+        nearest_archive_row = int(np.argmin(distance[:, col])) if distance.shape[0] else None
+        selected_archive_frame = selected_by_archive.get(col)
+        rank = selected_frames.index(frame_idx) if selected else None
+        scores[frame_idx] = float(score)
+        details[frame_idx] = {
+            "score": float(score),
+            "kcenter_selected": bool(selected),
+            "kcenter_forced_keep": bool(forced),
+            "kcenter_rank": rank,
+            "kcenter_radius": current_radius,
+            "kcenter_mean_radius": mean_radius,
+            "kcenter_removal_radius_increase": (
+                float(removal_radius_increases.get(col, 0.0)) if selected else 0.0
+            ),
+            "kcenter_archive_size": len(archive_frame_indices),
+            "kcenter_nearest_archive_frame": (
+                None if nearest_archive_row is None else int(archive_frame_indices[nearest_archive_row])
+            ),
+            "kcenter_nearest_archive_distance": (
+                None if nearest_archive_row is None else float(distance[nearest_archive_row, col])
+            ),
+            "kcenter_selected_for_archive_frame": selected_archive_frame,
+            "kcenter_visual_weight": float(visual_weight if use_visual else 0.0),
+            "kcenter_pose_weight": float(pose_weight),
+            "kcenter_time_weight": float(time_weight),
         }
 
     return (scores, details) if return_details else scores

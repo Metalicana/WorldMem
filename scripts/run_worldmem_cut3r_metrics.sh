@@ -30,6 +30,18 @@ LIMIT="${LIMIT:-}"
 RECON_DIR="${RECON_DIR:-$OUTPUT_ROOT/metrics/cut3r_pose_recon}"
 METRICS_DIR="${METRICS_DIR:-$OUTPUT_ROOT/metrics/cut3r_camera_metrics}"
 
+if TORCH_LIB_DIR="$(python - <<'PY' 2>/dev/null
+from pathlib import Path
+import torch
+
+print(Path(torch.__file__).resolve().parent / "lib")
+PY
+)"; then
+  if [ -d "$TORCH_LIB_DIR" ]; then
+    export LD_LIBRARY_PATH="$TORCH_LIB_DIR:${LD_LIBRARY_PATH:-}"
+  fi
+fi
+
 cd "$WORLDMEM_REPO_ROOT"
 
 run_args=(
@@ -78,6 +90,7 @@ echo "Data dir: $DATA_DIR"
 echo "Runs: $RUNS"
 echo "CUT3R root: $CUT3R_ROOT"
 echo "CUT3R model: $CUT3R_MODEL"
+echo "Torch lib dir: ${TORCH_LIB_DIR:-unknown}"
 echo "Duration seconds: $DURATION_SEC"
 echo "Context frames: $CONTEXT_FRAMES"
 echo "N frames valid: $N_FRAMES_VALID"

@@ -1097,6 +1097,109 @@ assets/plots/worldmem_fvd_prefix_60s_n15.pdf
 
 For CUT3R camera trajectory metrics, use the MemCam/CUT3R checkout and checkpoint. Start with a smoke subset:
 
+If the CECSL build of CUT3R's `curope` extension fails with
+`no suitable conversion function from "const at::DeprecatedTypeProperties" to "c10::ScalarType"`,
+patch the old PyTorch dispatch call before building:
+
+```bash
+cd ~/MemCam/CUT3R/src/croco/models/curope
+set -e
+conda activate worldmem
+export CUDA_VISIBLE_DEVICES=0
+
+python - <<'PY'
+from pathlib import Path
+
+path = Path("kernels.cu")
+text = path.read_text()
+old = 'AT_DISPATCH_FLOATING_TYPES_AND_HALF(tokens.type(), "rope_2d_cuda", ([&] {'
+new = 'AT_DISPATCH_FLOATING_TYPES_AND_HALF(tokens.scalar_type(), "rope_2d_cuda", ([&] {'
+
+if old in text:
+    path.write_text(text.replace(old, new))
+    print("patched kernels.cu")
+elif new in text:
+    print("kernels.cu already patched")
+else:
+    raise SystemExit("did not find the expected curope dispatch line")
+PY
+
+grep -n 'tokens\.scalar_type()' kernels.cu
+
+ARCH=$(python - <<'PY'
+import torch
+major, minor = torch.cuda.get_device_capability(0)
+print(f"{major}.{minor}")
+PY
+)
+
+rm -rf build
+rm -f curope*.so
+MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="$ARCH" python setup.py build_ext --inplace
+
+export LD_LIBRARY_PATH="$(python - <<'PY'
+from pathlib import Path
+import torch
+print(Path(torch.__file__).resolve().parent / "lib")
+PY
+):${LD_LIBRARY_PATH:-}"
+
+python - <<'PY'
+import torch
+import curope
+print("curope import ok")
+PY
+```
+
+The CUDA 12.9 versus PyTorch CUDA 12.8 minor-version warning is usually okay. The real compile blocker is the deprecated `tokens.type()` dispatch call.
+
+If the build appears to hang, first note that `/usr/bin/gcc` being present is enough for the host compiler. The warning about `ninja` only means PyTorch falls back to a slower serial build backend. A second slowdown comes from CUT3R's `setup.py`, which may compile many CUDA architectures even on one Blackwell GPU. To force only the current GPU architecture, patch `setup.py` before rebuilding:
+
+```bash
+cd ~/MemCam/CUT3R/src/croco/models/curope
+
+python - <<'PY'
+from pathlib import Path
+
+path = Path("setup.py")
+text = path.read_text()
+old = 'all_cuda_archs = cuda.get_gencode_flags().replace("compute=", "arch=").split()'
+new = '''major, minor = cuda.get_device_capability(0)
+arch = f"{major}{minor}"
+all_cuda_archs = ["-gencode", f"arch=compute_{arch},code=sm_{arch}"]'''
+
+if old in text:
+    path.write_text(text.replace(old, new))
+    print("patched setup.py to build only the current GPU arch")
+elif "cuda.get_device_capability(0)" in text:
+    print("setup.py already patched for current GPU arch")
+else:
+    raise SystemExit("did not find the expected arch-list line")
+PY
+
+grep -n 'get_device_capability' setup.py
+grep -n 'all_cuda_archs' setup.py
+
+rm -rf build
+rm -f curope*.so
+MAX_JOBS=4 python setup.py build_ext --inplace
+
+export LD_LIBRARY_PATH="$(python - <<'PY'
+from pathlib import Path
+import torch
+print(Path(torch.__file__).resolve().parent / "lib")
+PY
+):${LD_LIBRARY_PATH:-}"
+
+python - <<'PY'
+import torch
+import curope
+print("curope import ok")
+PY
+```
+
+Then start with a smoke subset:
+
 ```bash
 cd ~/WorldMem
 conda activate worldmem

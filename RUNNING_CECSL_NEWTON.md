@@ -1224,6 +1224,31 @@ With PyTorch 2.6+, raw CUT3R may fail checkpoint loading with
 The WorldMem wrapper `utils/run_cut3r_worldmem.py` handles this for the trusted local
 `CUT3R_MODEL` path by loading the checkpoint with `weights_only=False`.
 
+Before trusting generated-video CUT3R metrics, run CUT3R on GT Minecraft future
+frames and compare those reconstructions to the same GT pose trace. If this GT
+sanity score is also terrible, the evaluator has a pose-convention/alignment
+issue rather than a WorldMem policy issue.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+CUT3R_ROOT=$HOME/MemCam/CUT3R \
+CUT3R_MODEL=$HOME/MemCam/CUT3R/src/cut3r_512_dpt_4_64.pth \
+LIMIT=1 \
+FORCE=1 \
+bash scripts/run_worldmem_cut3r_gt_sanity.sh
+
+cd /data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_camera_metrics_gt_sanity
+python - <<'PY'
+import pandas as pd
+df = pd.read_csv("cut3r_camera_summary.csv")
+print(df.to_string(index=False))
+PY
+```
+
 ```bash
 cd ~/WorldMem
 conda activate worldmem

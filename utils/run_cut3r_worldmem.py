@@ -166,7 +166,18 @@ def main():
         raise RuntimeError("CUT3R requested CUDA but torch.cuda.is_available() is false.")
 
     print(f"Loading CUT3R model: {args.model_path}")
-    model = ARCroco3DStereo.from_pretrained(str(args.model_path)).to(args.device)
+    original_torch_load = torch.load
+
+    def trusted_checkpoint_load(*load_args, **load_kwargs):
+        # CUT3R checkpoints store an OmegaConf config object; PyTorch 2.6+ defaults to weights_only=True.
+        load_kwargs.setdefault("weights_only", False)
+        return original_torch_load(*load_args, **load_kwargs)
+
+    torch.load = trusted_checkpoint_load
+    try:
+        model = ARCroco3DStereo.from_pretrained(str(args.model_path)).to(args.device)
+    finally:
+        torch.load = original_torch_load
     model.eval()
 
     status_rows = []

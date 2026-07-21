@@ -1200,6 +1200,30 @@ PY
 
 Then start with a smoke subset:
 
+Install CUT3R's Python dependencies into `worldmem` without letting CUT3R replace the CECSL-compatible PyTorch build:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+grep -vE '^(torch|torchvision|numpy==|pillow==)' \
+  "$HOME/MemCam/CUT3R/requirements.txt" \
+  > /tmp/cut3r-requirements-no-torch.txt
+
+python -m pip install -r /tmp/cut3r-requirements-no-torch.txt
+```
+
+If the immediate error is only `ModuleNotFoundError: No module named 'transformers'`, the typo-free minimal install is:
+
+```bash
+python -m pip install transformers
+```
+
+With PyTorch 2.6+, raw CUT3R may fail checkpoint loading with
+`Weights only load failed` because `torch.load` now defaults to `weights_only=True`.
+The WorldMem wrapper `utils/run_cut3r_worldmem.py` handles this for the trusted local
+`CUT3R_MODEL` path by loading the checkpoint with `weights_only=False`.
+
 ```bash
 cd ~/WorldMem
 conda activate worldmem

@@ -21,8 +21,10 @@ SAMPLING_TIMESTEPS="${SAMPLING_TIMESTEPS:-20}"
 DECODE_CHUNK_SIZE="${DECODE_CHUNK_SIZE:-32}"
 SAMPLE_INTERVAL="${SAMPLE_INTERVAL:-1}"
 MINE_POLICY="${MINE_POLICY:-rarity_irreplaceability}"
+MINE_POLICIES="${MINE_POLICIES:-$MINE_POLICY}"
 MINE_BUDGETS="${MINE_BUDGETS:-32}"
 MEMORY_BANK_DEVICES="${MEMORY_BANK_DEVICES:-cpu}"
+INCLUDE_UNBOUNDED="${INCLUDE_UNBOUNDED:-1}"
 SAVE_LOCAL_PER_BATCH="${SAVE_LOCAL_PER_BATCH:-false}"
 LOG_VIDEO="${LOG_VIDEO:-false}"
 PROFILE_ROOT="${PROFILE_ROOT:-$STORAGE_ROOT/outputs/memory_policy/gpu_memory_profiles/$(date +%F_%H%M%S)}"
@@ -42,8 +44,9 @@ echo "Storage root: $STORAGE_ROOT"
 echo "Profile root: $PROFILE_ROOT"
 echo "Future seconds: $FUTURE_SECONDS"
 echo "Videos per run: $NUM_VIDEOS"
-echo "Mine policy: $MINE_POLICY"
+echo "Mine policies: $MINE_POLICIES"
 echo "Mine budgets: $MINE_BUDGETS"
+echo "Include unbounded: $INCLUDE_UNBOUNDED"
 echo "Memory bank devices: $MEMORY_BANK_DEVICES"
 echo
 
@@ -352,18 +355,26 @@ run_profile() {
 }
 
 IFS=',' read -r -a BANK_DEVICE_ARRAY <<< "$MEMORY_BANK_DEVICES"
+IFS=',' read -r -a MINE_POLICY_ARRAY <<< "$MINE_POLICIES"
 IFS=',' read -r -a BUDGET_ARRAY <<< "$MINE_BUDGETS"
 
 for bank_device in "${BANK_DEVICE_ARRAY[@]}"; do
   bank_device="${bank_device//[[:space:]]/}"
   [ -n "$bank_device" ] || continue
 
-  run_profile "unbounded" "" "$bank_device"
+  if [ "$INCLUDE_UNBOUNDED" = "1" ] || [ "$INCLUDE_UNBOUNDED" = "true" ]; then
+    run_profile "unbounded" "" "$bank_device"
+  fi
 
-  for budget in "${BUDGET_ARRAY[@]}"; do
-    budget="${budget//[[:space:]]/}"
-    [ -n "$budget" ] || continue
-    run_profile "$MINE_POLICY" "$budget" "$bank_device"
+  for mine_policy in "${MINE_POLICY_ARRAY[@]}"; do
+    mine_policy="${mine_policy//[[:space:]]/}"
+    [ -n "$mine_policy" ] || continue
+
+    for budget in "${BUDGET_ARRAY[@]}"; do
+      budget="${budget//[[:space:]]/}"
+      [ -n "$budget" ] || continue
+      run_profile "$mine_policy" "$budget" "$bank_device"
+    done
   done
 done
 

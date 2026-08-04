@@ -27,6 +27,7 @@ from .memory_policies import (
     BUDGETED_MEMORY_POLICIES,
     FrameMemoryBuffer,
     compute_kcenter_coreset_scores,
+    pairwise_mean_abs_distances,
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
 )
@@ -377,19 +378,82 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.profile_cuda_memory = getattr(cfg, "profile_cuda_memory", False)
         self.profile_timing = getattr(cfg, "profile_timing", self.profile_cuda_memory)
         self.memory_bank_device = getattr(cfg, "memory_bank_device", "cpu")
+        self.memory_reference_source = getattr(cfg, "memory_reference_source", "predicted")
+        self.memory_feature_backend = getattr(cfg, "memory_feature_backend", "latent")
+        self.memory_feature_device = getattr(cfg, "memory_feature_device", "auto")
+        self.memory_dino_model_name = getattr(
+            cfg,
+            "memory_dino_model_name",
+            "facebook/dinov2-base",
+        )
+        self.memory_feature_batch_size = max(
+            int(getattr(cfg, "memory_feature_batch_size", 16)),
+            1,
+        )
+        generation_seed = getattr(cfg, "generation_seed", None)
+        self.generation_seed = None if generation_seed is None else int(generation_seed)
+        self.memory_policy_seed = int(getattr(cfg, "memory_policy_seed", 0))
+        retrieval_candidate_cap = getattr(cfg, "retrieval_candidate_cap", None)
+        self.retrieval_candidate_cap = (
+            None
+            if retrieval_candidate_cap in {None, "", "None"}
+            else int(retrieval_candidate_cap)
+        )
+        self.trace_candidate_diagnostics = bool(
+            getattr(cfg, "trace_candidate_diagnostics", False)
+        )
+        self.trace_candidate_top_k = max(
+            int(getattr(cfg, "trace_candidate_top_k", 16)),
+            0,
+        )
+        self.trace_candidate_sample_size = max(
+            int(getattr(cfg, "trace_candidate_sample_size", 16)),
+            0,
+        )
+        self.trace_bank_state = bool(getattr(cfg, "trace_bank_state", False))
+        self.trace_bank_max_frames = max(
+            int(getattr(cfg, "trace_bank_max_frames", 256)),
+            1,
+        )
         self.kcenter_archive_stride = max(int(getattr(cfg, "kcenter_archive_stride", 1)), 1)
         self.kcenter_visual_weight = float(getattr(cfg, "kcenter_visual_weight", 0.5))
         self.kcenter_pose_weight = float(getattr(cfg, "kcenter_pose_weight", 0.5))
         self.kcenter_time_weight = float(getattr(cfg, "kcenter_time_weight", 0.0))
         if self.memory_bank_device not in {"cpu", "gpu"}:
             raise ValueError("memory_bank_device must be either 'cpu' or 'gpu'")
+        if self.memory_reference_source not in {"predicted", "ground_truth"}:
+            raise ValueError(
+                "memory_reference_source must be either 'predicted' or 'ground_truth'"
+            )
+        if self.memory_feature_backend not in {"latent", "dino", "dino_rgb"}:
+            raise ValueError(
+                "memory_feature_backend must be one of: latent, dino, dino_rgb"
+            )
+        if self.memory_feature_device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("memory_feature_device must be one of: auto, cpu, cuda")
+        if self.retrieval_candidate_cap is not None and self.retrieval_candidate_cap <= 0:
+            raise ValueError("retrieval_candidate_cap must be positive when provided")
+        if (
+            self.retrieval_candidate_cap is not None
+            and self.retrieval_candidate_cap < self.memory_condition_length
+        ):
+            raise ValueError(
+                "retrieval_candidate_cap must be at least memory_condition_length"
+            )
         if self.memory_bank_device == "gpu" and not torch.cuda.is_available():
             raise ValueError("memory_bank_device='gpu' requires CUDA")
         if self.memory_policy in BUDGETED_MEMORY_POLICIES and self.memory_budget is None:
             raise ValueError(f"{self.memory_policy} memory policy requires +algorithm.memory_budget=<int>")
         self._access_trace_handle = None
         self._last_retrieval_trace = []
+        self._last_candidate_trace = []
         self._current_global_batch_idx = None
+        self._current_context_frames = None
+        self._current_generation_seed = None
+        self._memory_dino_features = []
+        self._memory_rgb_features = []
+        self.__dict__["_memory_dino_processor"] = None
+        self.__dict__["_memory_dino_model"] = None
         self._stream_metric_sums = {"mse": 0.0, "psnr": 0.0, "lpips": 0.0}
         self._stream_metric_count = 0
 
@@ -654,11 +718,39 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "memory_policy": self.memory_policy,
             "memory_budget": self.memory_budget,
             "memory_bank_device": self.memory_bank_device,
+            "memory_reference_source": self.memory_reference_source,
+            "memory_feature_backend": self.memory_feature_backend,
+            "retrieval_candidate_cap": self.retrieval_candidate_cap,
+            "generation_seed": self._current_generation_seed,
             **payload,
         }
         if self._current_global_batch_idx is not None and "global_batch_idx" not in payload:
             payload["global_batch_idx"] = int(self._current_global_batch_idx)
         self._access_trace_handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self._access_trace_handle.flush()
+
+    def _write_access_trace_many(self, payloads):
+        if self._access_trace_handle is None:
+            return
+        for payload in payloads:
+            decorated = {
+                "memory_policy": self.memory_policy,
+                "memory_budget": self.memory_budget,
+                "memory_bank_device": self.memory_bank_device,
+                "memory_reference_source": self.memory_reference_source,
+                "memory_feature_backend": self.memory_feature_backend,
+                "retrieval_candidate_cap": self.retrieval_candidate_cap,
+                "generation_seed": self._current_generation_seed,
+                **payload,
+            }
+            if (
+                self._current_global_batch_idx is not None
+                and "global_batch_idx" not in decorated
+            ):
+                decorated["global_batch_idx"] = int(self._current_global_batch_idx)
+            self._access_trace_handle.write(
+                json.dumps(decorated, ensure_ascii=False) + "\n"
+            )
         self._access_trace_handle.flush()
 
     def _accumulate_stream_metrics(self, xs_pred, xs_decode):
@@ -742,8 +834,25 @@ class WorldMemMinecraft(DiffusionForcingBase):
         if torch.cuda.is_available():
             torch.cuda.synchronize(torch.cuda.current_device())
 
+    def _seed_generation_for_batch(self, global_batch_idx):
+        if self.generation_seed is None:
+            self._current_generation_seed = None
+            return
+        seed = int(self.generation_seed) + int(global_batch_idx)
+        self._current_generation_seed = seed
+        random.seed(seed)
+        np.random.seed(seed % (2**32))
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
     def _pinned_memory_frames(self):
-        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility", "kcenter_coreset"}:
+        if self.memory_policy in {
+            "random_cap",
+            "rarity_irreplaceability",
+            "slam_covisibility",
+            "kcenter_coreset",
+        }:
             return {0}
         return set()
 
@@ -758,6 +867,270 @@ class WorldMemMinecraft(DiffusionForcingBase):
         for offset, frame_idx in enumerate(valid_indices):
             features[frame_idx] = pooled[offset]
         return features
+
+    def _ensure_memory_feature_caches(self, batch_size):
+        while len(self._memory_dino_features) < batch_size:
+            self._memory_dino_features.append({})
+            self._memory_rgb_features.append({})
+
+    def _resolve_memory_feature_device(self):
+        if self.memory_feature_device == "cpu":
+            return torch.device("cpu")
+        if self.memory_feature_device == "cuda":
+            if not torch.cuda.is_available():
+                raise ValueError("memory_feature_device='cuda' requires CUDA")
+            return self.device
+        return self.device if torch.cuda.is_available() else torch.device("cpu")
+
+    def _ensure_memory_dino_model(self):
+        model = self.__dict__.get("_memory_dino_model")
+        processor = self.__dict__.get("_memory_dino_processor")
+        if model is not None and processor is not None:
+            return processor, model
+
+        try:
+            from transformers import AutoImageProcessor, AutoModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "DINO memory features require transformers. Install the repo "
+                "requirements before using memory_feature_backend=dino or dino_rgb."
+            ) from exc
+
+        processor = AutoImageProcessor.from_pretrained(self.memory_dino_model_name)
+        model = AutoModel.from_pretrained(self.memory_dino_model_name)
+        model = model.eval().to(self._resolve_memory_feature_device())
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        self.__dict__["_memory_dino_processor"] = processor
+        self.__dict__["_memory_dino_model"] = model
+        return processor, model
+
+    def _dino_rgb_feature_dict(self, xs_pred, frame_indices, batch_index):
+        valid_indices = sorted(
+            {int(idx) for idx in frame_indices if 0 <= int(idx) < xs_pred.shape[0]}
+        )
+        self._ensure_memory_feature_caches(xs_pred.shape[1])
+        dino_cache = self._memory_dino_features[batch_index]
+        rgb_cache = self._memory_rgb_features[batch_index]
+        missing = [idx for idx in valid_indices if idx not in dino_cache]
+        if missing:
+            processor, model = self._ensure_memory_dino_model()
+            feature_device = next(model.parameters()).device
+            vae_device = next(self.vae.parameters()).device
+            with torch.inference_mode():
+                for start in range(0, len(missing), self.memory_feature_batch_size):
+                    batch_indices = missing[start : start + self.memory_feature_batch_size]
+                    latents = xs_pred[batch_indices, batch_index : batch_index + 1]
+                    decoded = self.decode(latents.to(vae_device)).squeeze(1).clamp(0, 1)
+                    images = [
+                        (
+                            frame.detach()
+                            .float()
+                            .cpu()
+                            .permute(1, 2, 0)
+                            .mul(255)
+                            .round()
+                            .byte()
+                            .numpy()
+                        )
+                        for frame in decoded
+                    ]
+                    inputs = processor(images=images, return_tensors="pt")
+                    inputs = {
+                        key: value.to(feature_device)
+                        for key, value in inputs.items()
+                    }
+                    outputs = model(**inputs)
+                    features = getattr(outputs, "pooler_output", None)
+                    if features is None:
+                        features = outputs.last_hidden_state[:, 0]
+                    features = F.normalize(features.float(), dim=-1).cpu().numpy()
+                    rgb_features = None
+                    if self.memory_feature_backend == "dino_rgb":
+                        rgb_features = np.stack(
+                            [
+                                np.asarray(
+                                    Image.fromarray(image)
+                                    .convert("RGB")
+                                    .resize((64, 64)),
+                                    dtype=np.float32,
+                                ).reshape(-1)
+                                / 255.0
+                                for image in images
+                            ]
+                        )
+                    for offset, frame_idx in enumerate(batch_indices):
+                        dino_cache[frame_idx] = features[offset]
+                        if self.memory_feature_backend == "dino_rgb":
+                            rgb_cache[frame_idx] = rgb_features[offset]
+                    del decoded, inputs, outputs, features
+
+        dino_features = {idx: dino_cache[idx] for idx in valid_indices}
+        rgb_features = None
+        if self.memory_feature_backend == "dino_rgb":
+            rgb_features = {idx: rgb_cache[idx] for idx in valid_indices}
+        return dino_features, rgb_features
+
+    def _memory_feature_dicts(self, xs_pred, frame_indices, batch_index):
+        if self.memory_feature_backend == "latent":
+            latent = self._latent_feature_dict(xs_pred, frame_indices, batch_index)
+            return latent, None, "cosine"
+        dino, rgb = self._dino_rgb_feature_dict(
+            xs_pred,
+            frame_indices,
+            batch_index,
+        )
+        if self.memory_feature_backend == "dino_rgb":
+            return dino, rgb, "mean_abs"
+        return dino, None, "cosine"
+
+    def _prune_memory_feature_caches(self, memory_buffers):
+        if self.memory_feature_backend == "latent" or memory_buffers is None:
+            return
+        if self.memory_policy == "kcenter_coreset":
+            return
+        for batch_index, buffer in enumerate(memory_buffers):
+            retained = set(buffer.candidates())
+            for cache in (
+                self._memory_dino_features[batch_index],
+                self._memory_rgb_features[batch_index],
+            ):
+                for frame_idx in list(cache):
+                    if frame_idx not in retained:
+                        cache.pop(frame_idx, None)
+
+    def _sample_trace_indices(self, frame_indices, max_items):
+        frame_indices = sorted({int(idx) for idx in frame_indices})
+        if len(frame_indices) <= max_items:
+            return frame_indices
+        positions = np.linspace(0, len(frame_indices) - 1, max_items, dtype=np.int64)
+        return [frame_indices[int(position)] for position in np.unique(positions)]
+
+    def _record_memory_bank_diagnostics(
+        self,
+        memory_buffers,
+        end_frame,
+        xs_pred,
+        phase,
+    ):
+        if not self.trace_bank_state:
+            return
+        rows = []
+        batch_size = xs_pred.shape[1]
+        for batch_index in range(batch_size):
+            if memory_buffers is None:
+                candidates = list(range(int(end_frame)))
+                buffer = None
+            else:
+                buffer = memory_buffers[batch_index]
+                candidates = buffer.candidates()
+            sampled = self._sample_trace_indices(
+                candidates,
+                self.trace_bank_max_frames,
+            )
+            latent_features = self._latent_feature_dict(
+                xs_pred,
+                sampled,
+                batch_index,
+            )
+            nn_mean = None
+            nn_median = None
+            policy_nn_mean = None
+            policy_nn_median = None
+            rgb_nn_mean = None
+            rgb_nn_median = None
+            if len(sampled) > 1:
+                matrix = np.stack([latent_features[idx] for idx in sampled])
+                matrix = matrix / np.maximum(
+                    np.linalg.norm(matrix, axis=1, keepdims=True),
+                    1e-12,
+                )
+                distances = 1.0 - np.clip(matrix @ matrix.T, -1.0, 1.0)
+                np.fill_diagonal(distances, np.inf)
+                nearest = np.min(distances, axis=1)
+                nn_mean = float(np.mean(nearest))
+                nn_median = float(np.median(nearest))
+                if self.memory_feature_backend != "latent":
+                    policy_features, rgb_features, _ = self._memory_feature_dicts(
+                        xs_pred,
+                        sampled,
+                        batch_index,
+                    )
+                    policy_matrix = np.stack(
+                        [policy_features[idx] for idx in sampled]
+                    )
+                    policy_matrix = policy_matrix / np.maximum(
+                        np.linalg.norm(policy_matrix, axis=1, keepdims=True),
+                        1e-12,
+                    )
+                    policy_distances = 1.0 - np.clip(
+                        policy_matrix @ policy_matrix.T,
+                        -1.0,
+                        1.0,
+                    )
+                    np.fill_diagonal(policy_distances, np.inf)
+                    policy_nearest = np.min(policy_distances, axis=1)
+                    policy_nn_mean = float(np.mean(policy_nearest))
+                    policy_nn_median = float(np.median(policy_nearest))
+                    if rgb_features is not None:
+                        rgb_matrix = np.stack([rgb_features[idx] for idx in sampled])
+                        rgb_distances = pairwise_mean_abs_distances(rgb_matrix)
+                        np.fill_diagonal(rgb_distances, np.inf)
+                        rgb_nearest = np.min(rgb_distances, axis=1)
+                        rgb_nn_mean = float(np.mean(rgb_nearest))
+                        rgb_nn_median = float(np.median(rgb_nearest))
+            dino_cache_mib = 0.0
+            rgb_cache_mib = 0.0
+            if batch_index < len(self._memory_dino_features):
+                dino_cache_mib = float(
+                    sum(
+                        value.nbytes
+                        for value in self._memory_dino_features[batch_index].values()
+                    )
+                    / (1024**2)
+                )
+                rgb_cache_mib = float(
+                    sum(value.nbytes for value in self._memory_rgb_features[batch_index].values())
+                    / (1024**2)
+                )
+            rows.append(
+                {
+                    "event": "memory_bank_summary",
+                    "phase": phase,
+                    "batch_index": batch_index,
+                    "chunk_end_frame": int(end_frame),
+                    "stored_memory_size": len(candidates),
+                    "sampled_memory_size": len(sampled),
+                    "latent_nn_distance_mean": nn_mean,
+                    "latent_nn_distance_median": nn_median,
+                    "policy_feature_nn_distance_mean": policy_nn_mean,
+                    "policy_feature_nn_distance_median": policy_nn_median,
+                    "rgb_nn_distance_mean": rgb_nn_mean,
+                    "rgb_nn_distance_median": rgb_nn_median,
+                    "dino_descriptor_cache_mib": dino_cache_mib,
+                    "rgb_descriptor_cache_mib": rgb_cache_mib,
+                }
+            )
+            for frame_idx in sampled:
+                stats = buffer.frame_stats(frame_idx) if buffer is not None else {}
+                rows.append(
+                    {
+                        "event": "memory_bank_state",
+                        "phase": phase,
+                        "batch_index": batch_index,
+                        "chunk_end_frame": int(end_frame),
+                        "stored_memory_size": len(candidates),
+                        "retained_memory_frame": int(frame_idx),
+                        "memory_age": int(end_frame - frame_idx),
+                        "source_is_initial_context": bool(
+                            self._current_context_frames is not None
+                            and frame_idx < self._current_context_frames
+                        ),
+                        "selected_count": int(stats.get("selected_count", 0)),
+                        "state_is_subsampled": len(sampled) < len(candidates),
+                    }
+                )
+        self._write_access_trace_many(rows)
 
     def _kcenter_archive_indices(self, end_frame):
         end_frame = max(int(end_frame), 0)
@@ -802,7 +1175,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
     def _compute_memory_scores(self, frame_indices, c2w_mat, xs_pred, batch_index, archive_frame_indices=None):
         frame_indices = sorted({int(idx) for idx in frame_indices if 0 <= int(idx) < xs_pred.shape[0]})
-        if self.memory_policy in {"unbounded", "fifo"} or not frame_indices:
+        if self.memory_policy in {"unbounded", "random_cap", "fifo"} or not frame_indices:
             return None, {}
 
         if archive_frame_indices is not None:
@@ -813,13 +1186,22 @@ class WorldMemMinecraft(DiffusionForcingBase):
         if self.memory_policy == "kcenter_coreset" and archive_frame_indices is not None:
             feature_frame_indices = sorted(set(frame_indices) | set(archive_frame_indices))
 
-        latent_features = self._latent_feature_dict(xs_pred, feature_frame_indices, batch_index)
+        primary_features, rgb_features, irreplaceability_metric = (
+            self._memory_feature_dicts(
+                xs_pred,
+                feature_frame_indices,
+                batch_index,
+            )
+        )
         pinned_frames = self._pinned_memory_frames()
 
         if self.memory_policy == "rarity_irreplaceability":
             return compute_rarity_irreplaceability_scores(
                 memory_frame_indices=frame_indices,
-                latent_features=latent_features,
+                latent_features=primary_features,
+                rarity_features=primary_features,
+                irreplaceability_features=rgb_features,
+                irreplaceability_metric=irreplaceability_metric,
                 pinned_frames=pinned_frames,
                 return_details=True,
             )
@@ -830,7 +1212,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 memory_frame_indices=frame_indices,
                 c2ws=c2ws,
                 pinned_frames=pinned_frames,
-                latent_features=latent_features,
+                latent_features=primary_features,
                 return_details=True,
             )
 
@@ -842,7 +1224,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 c2ws=c2ws,
                 budget=self.memory_budget,
                 pinned_frames=pinned_frames,
-                latent_features=latent_features,
+                latent_features=primary_features,
                 visual_weight=self.kcenter_visual_weight,
                 pose_weight=self.kcenter_pose_weight,
                 time_weight=self.kcenter_time_weight,
@@ -863,6 +1245,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 policy=self.memory_policy,
                 budget=self.memory_budget,
                 pinned_frames=self._pinned_memory_frames(),
+                random_seed=(
+                    self.memory_policy_seed
+                    + 100003 * int(self._current_global_batch_idx or 0)
+                    + batch_index
+                ),
             )
             scores, score_details = self._compute_memory_scores(
                 initial_frames,
@@ -889,12 +1276,34 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     }
                 )
             memory_buffers.append(buffer)
+        self._prune_memory_feature_caches(memory_buffers)
         return memory_buffers
 
-    def _memory_candidate_lists(self, memory_buffers, batch_size):
-        if memory_buffers is None:
+    def _memory_candidate_lists(self, memory_buffers, batch_size, end_frame):
+        if memory_buffers is None and self.retrieval_candidate_cap is None:
             return None
-        return [memory_buffers[batch_index].candidates() for batch_index in range(batch_size)]
+
+        candidate_lists = []
+        for batch_index in range(batch_size):
+            if memory_buffers is None:
+                candidates = list(range(int(end_frame)))
+            else:
+                candidates = memory_buffers[batch_index].candidates()
+            cap = self.retrieval_candidate_cap
+            if cap is not None and len(candidates) > cap:
+                seed = (
+                    int(self.memory_policy_seed)
+                    + 100003 * int(self._current_global_batch_idx or 0)
+                    + 1009 * int(end_frame)
+                    + batch_index
+                )
+                rng = np.random.default_rng(seed)
+                candidates = sorted(
+                    int(index)
+                    for index in rng.choice(candidates, size=cap, replace=False)
+                )
+            candidate_lists.append(candidates)
+        return candidate_lists
 
     def _gpu_memory_bank_target_frames(self, memory_buffers, end_frame):
         if memory_buffers is None:
@@ -962,6 +1371,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         return torch.stack(refs, dim=0)
 
     def _record_retrieval_trace(self, memory_buffers):
+        self._write_access_trace_many(self._last_candidate_trace)
         for record in self._last_retrieval_trace:
             batch_index = record.get("batch_index", 0)
             selected_frame = record.get("selected_memory_frame")
@@ -970,6 +1380,26 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 memory_buffers[batch_index].record_selection(selected_frame, selected_overlap)
                 record["selected_count_after"] = memory_buffers[batch_index].selected_count(selected_frame)
             self._write_access_trace(record)
+
+    def _candidate_diagnostic_indices(self, confidence, valid_mask):
+        valid_indices = torch.nonzero(valid_mask, as_tuple=False).flatten()
+        if valid_indices.numel() == 0:
+            return []
+        values = confidence[valid_indices]
+        order = torch.argsort(values, descending=True)
+        ranked = valid_indices[order].tolist()
+        keep_ranks = set(range(min(self.trace_candidate_top_k, len(ranked))))
+        remaining = len(ranked) - len(keep_ranks)
+        if self.trace_candidate_sample_size > 0 and remaining > 0:
+            sample_count = min(self.trace_candidate_sample_size, remaining)
+            positions = np.linspace(
+                len(keep_ranks),
+                len(ranked) - 1,
+                sample_count,
+                dtype=np.int64,
+            )
+            keep_ranks.update(int(position) for position in positions)
+        return [(int(ranked[rank]), int(rank)) for rank in sorted(keep_ranks)]
 
     def _update_memory_buffers(self, memory_buffers, curr_frame, horizon, c2w_mat, xs_pred):
         if memory_buffers is None:
@@ -1008,6 +1438,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                         **self._memory_eviction_detail_fields(detail),
                     }
                 )
+        self._prune_memory_feature_caches(memory_buffers)
 
     def _generate_condition_indices(
         self,
@@ -1018,11 +1449,13 @@ class WorldMemMinecraft(DiffusionForcingBase):
         frame_idx,
         horizon,
         candidate_indices=None,
+        stored_memory_sizes=None,
     ):
         """
         Generate indices for condition similarity based on the current frame and pose conditions.
         """
         self._last_retrieval_trace = []
+        self._last_candidate_trace = []
         batch_size = xs_pred.shape[1]
 
         def valid_candidates_for_batch(batch_index):
@@ -1054,8 +1487,17 @@ class WorldMemMinecraft(DiffusionForcingBase):
                             "target_horizon": int(horizon),
                             "context_slot": int(slot_idx),
                             "selected_memory_frame": int(selected_frame),
+                            "selected_memory_age": int(curr_frame - selected_frame),
+                            "source_is_initial_context": bool(
+                                self._current_context_frames is not None
+                                and selected_frame < self._current_context_frames
+                            ),
                             "candidate_count": len(candidates),
-                            "stored_memory_size": len(candidates),
+                            "stored_memory_size": (
+                                int(stored_memory_sizes[batch_index])
+                                if stored_memory_sizes is not None
+                                else len(candidates)
+                            ),
                             "selected_overlap": None,
                             "selected_confidence": None,
                             "fallback_reason": "warmup",
@@ -1141,13 +1583,74 @@ class WorldMemMinecraft(DiffusionForcingBase):
                             "target_horizon": int(horizon),
                             "context_slot": int(slot_idx),
                             "selected_memory_frame": selected_frame,
+                            "selected_memory_age": int(curr_frame - selected_frame),
+                            "source_is_initial_context": bool(
+                                self._current_context_frames is not None
+                                and selected_frame < self._current_context_frames
+                            ),
                             "candidate_count": int(candidate_counts[batch_index]),
-                            "stored_memory_size": int(candidate_counts[batch_index]),
+                            "stored_memory_size": (
+                                int(stored_memory_sizes[batch_index])
+                                if stored_memory_sizes is not None
+                                else int(candidate_counts[batch_index])
+                            ),
                             "selected_overlap": selected_overlap,
                             "selected_confidence": selected_confidence,
                             "fallback_reason": None,
                         }
                     )
+                    if self.trace_candidate_diagnostics:
+                        diagnostic_indices = self._candidate_diagnostic_indices(
+                            confidence[:, batch_index],
+                            candidate_mask[:, batch_index],
+                        )
+                        for local_candidate_idx, candidate_rank in diagnostic_indices:
+                            candidate_frame = int(
+                                candidate_tensor[local_candidate_idx].item()
+                            )
+                            self._last_candidate_trace.append(
+                                {
+                                    "event": "memory_candidate",
+                                    "batch_index": batch_index,
+                                    "target_frame": int(curr_frame),
+                                    "target_horizon": int(horizon),
+                                    "context_slot": int(slot_idx),
+                                    "candidate_frame": candidate_frame,
+                                    "candidate_rank": candidate_rank,
+                                    "candidate_count": int(candidate_counts[batch_index]),
+                                    "stored_memory_size": (
+                                        int(stored_memory_sizes[batch_index])
+                                        if stored_memory_sizes is not None
+                                        else int(candidate_counts[batch_index])
+                                    ),
+                                    "candidate_overlap": float(
+                                        overlap_ratio[
+                                            local_candidate_idx,
+                                            batch_index,
+                                        ]
+                                        .detach()
+                                        .cpu()
+                                        .item()
+                                    ),
+                                    "candidate_confidence": float(
+                                        confidence[
+                                            local_candidate_idx,
+                                            batch_index,
+                                        ]
+                                        .detach()
+                                        .cpu()
+                                        .item()
+                                    ),
+                                    "candidate_age": int(curr_frame - candidate_frame),
+                                    "source_is_initial_context": bool(
+                                        self._current_context_frames is not None
+                                        and candidate_frame < self._current_context_frames
+                                    ),
+                                    "selected": bool(
+                                        local_candidate_idx == local_selected_idx
+                                    ),
+                                }
+                            )
                     candidate_mask[local_selected_idx, batch_index] = False
 
                 # choice 1: directly remove overlapping region
@@ -1231,6 +1734,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
         """
         global_batch_idx = int(batch_idx) + self.output_batch_offset
         self._current_global_batch_idx = global_batch_idx
+        self._seed_generation_for_batch(global_batch_idx)
+        self._memory_dino_features = []
+        self._memory_rgb_features = []
         run_start_time = time.perf_counter()
         timing = {
             "retrieval_seconds": 0.0,
@@ -1268,17 +1774,21 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
         # Initialize context frames
         n_context_frames = self.context_frames // self.frame_stack
+        self._current_context_frames = int(n_context_frames)
         xs_pred = xs[:n_context_frames].clone()
         curr_frame += n_context_frames
+        memory_source_latents = (
+            xs if self.memory_reference_source == "ground_truth" else xs_pred
+        )
         memory_buffers = self._build_memory_buffers(
             n_context_frames,
             batch_size,
             c2w_mat,
-            xs_pred,
+            memory_source_latents,
         )
         gpu_memory_bank = self._sync_gpu_memory_bank(
             None,
-            xs_pred,
+            memory_source_latents,
             memory_buffers,
             curr_frame,
             phase="initial_context",
@@ -1294,7 +1804,16 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "context_frames": int(n_context_frames),
                 "memory_condition_length": int(memory_condition_length),
                 "batch_size": int(batch_size),
+                "dataset_batch_idx": int(global_batch_idx),
+                "generation_seed": self._current_generation_seed,
+                "memory_policy_seed": int(self.memory_policy_seed),
             }
+        )
+        self._record_memory_bank_diagnostics(
+            memory_buffers,
+            curr_frame,
+            memory_source_latents,
+            phase="initial_context",
         )
 
         # Progress bar for sampling
@@ -1318,7 +1837,16 @@ class WorldMemMinecraft(DiffusionForcingBase):
             # Handle condition similarity logic
             memory_refs_gpu = None
             if memory_condition_length:
-                candidate_indices = self._memory_candidate_lists(memory_buffers, batch_size)
+                candidate_indices = self._memory_candidate_lists(
+                    memory_buffers,
+                    batch_size,
+                    curr_frame,
+                )
+                stored_memory_sizes = (
+                    [curr_frame] * batch_size
+                    if memory_buffers is None
+                    else [len(buffer) for buffer in memory_buffers]
+                )
                 if self.profile_timing:
                     self._sync_cuda_if_needed()
                     section_start = time.perf_counter()
@@ -1330,6 +1858,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     frame_idx,
                     horizon,
                     candidate_indices=candidate_indices,
+                    stored_memory_sizes=stored_memory_sizes,
                 )
                 self._record_retrieval_trace(memory_buffers)
                 if self.profile_timing:
@@ -1337,14 +1866,33 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     timing["retrieval_seconds"] += time.perf_counter() - section_start
 
                 if self.memory_bank_device == "gpu":
+                    memory_source_latents = (
+                        xs
+                        if self.memory_reference_source == "ground_truth"
+                        else xs_pred
+                    )
                     memory_refs_gpu = self._gather_gpu_memory_references(
                         gpu_memory_bank,
                         random_idx,
-                        xs_pred,
+                        memory_source_latents,
                         device=conditions.device,
                     )
                 else:
-                    xs_pred = torch.cat([xs_pred, xs_pred[random_idx[:, range(xs_pred.shape[1])], range(xs_pred.shape[1])].clone()], 0)
+                    memory_source_latents = (
+                        xs
+                        if self.memory_reference_source == "ground_truth"
+                        else xs_pred
+                    )
+                    xs_pred = torch.cat(
+                        [
+                            xs_pred,
+                            memory_source_latents[
+                                random_idx[:, range(xs_pred.shape[1])],
+                                range(xs_pred.shape[1]),
+                            ].clone(),
+                        ],
+                        0,
+                    )
 
             # Prepare input conditions and pose conditions
             input_condition, input_pose_condition, frame_idx_list = self._prepare_conditions(
@@ -1403,12 +1951,27 @@ class WorldMemMinecraft(DiffusionForcingBase):
             if self.profile_timing:
                 self._sync_cuda_if_needed()
                 section_start = time.perf_counter()
-            self._update_memory_buffers(memory_buffers, curr_frame, horizon, c2w_mat, xs_pred)
+            memory_source_latents = (
+                xs if self.memory_reference_source == "ground_truth" else xs_pred
+            )
+            self._update_memory_buffers(
+                memory_buffers,
+                curr_frame,
+                horizon,
+                c2w_mat,
+                memory_source_latents,
+            )
             gpu_memory_bank = self._sync_gpu_memory_bank(
                 gpu_memory_bank,
-                xs_pred,
+                memory_source_latents,
                 memory_buffers,
                 curr_frame + horizon,
+                phase="generation",
+            )
+            self._record_memory_bank_diagnostics(
+                memory_buffers,
+                curr_frame + horizon,
+                memory_source_latents,
                 phase="generation",
             )
             if self.profile_timing:
@@ -1505,6 +2068,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
         )
         self._close_access_trace()
         self._current_global_batch_idx = None
+        self._current_context_frames = None
+        self._current_generation_seed = None
+        self._memory_dino_features = []
+        self._memory_rgb_features = []
         self._release_batch_memory()
         return
 

@@ -1,5 +1,6 @@
 import argparse
 import csv
+import itertools
 import json
 import math
 from collections import defaultdict
@@ -91,9 +92,9 @@ def fit_scalar(pred_points, gt_points):
     return float(np.sum(gt_points * pred_points) / denominator)
 
 
-def fit_umeyama(pred_points, gt_points):
+def fit_umeyama_transform(pred_points, gt_points):
     if len(pred_points) < 2:
-        return pred_points.copy(), 1.0
+        return pred_points.copy(), 1.0, np.eye(3, dtype=np.float64), np.zeros(3, dtype=np.float64)
 
     pred_mean = pred_points.mean(axis=0)
     gt_mean = gt_points.mean(axis=0)
@@ -102,7 +103,7 @@ def fit_umeyama(pred_points, gt_points):
 
     variance = float(np.mean(np.sum(pred_centered * pred_centered, axis=1)))
     if variance <= 1e-12:
-        return pred_points.copy(), 1.0
+        return pred_points.copy(), 1.0, np.eye(3, dtype=np.float64), np.zeros(3, dtype=np.float64)
 
     covariance = (gt_centered.T @ pred_centered) / len(pred_points)
     u_mat, singular_values, vt_mat = np.linalg.svd(covariance)
@@ -111,8 +112,78 @@ def fit_umeyama(pred_points, gt_points):
     correction[-1, -1] = sign if sign != 0 else 1.0
     rotation = u_mat @ correction @ vt_mat
     scale = float(np.sum(singular_values * np.diag(correction)) / variance)
-    aligned = (scale * (rotation @ pred_centered.T)).T + gt_mean
+    translation = gt_mean - scale * rotation @ pred_mean
+    aligned = (scale * (rotation @ pred_points.T)).T + translation
+    return aligned, scale, rotation, translation
+
+
+def fit_umeyama(pred_points, gt_points):
+    aligned, scale, _rotation, _translation = fit_umeyama_transform(pred_points, gt_points)
     return aligned, scale
+
+
+def signed_permutation_bases():
+    axes = ["x", "y", "z"]
+    for permutation in itertools.permutations(range(3)):
+        for signs in itertools.product([-1.0, 1.0], repeat=3):
+            basis = np.zeros((3, 3), dtype=np.float64)
+            labels = []
+            for row, axis_idx in enumerate(permutation):
+                basis[row, axis_idx] = signs[row]
+                labels.append(("-" if signs[row] < 0 else "+") + axes[axis_idx])
+            if round(float(np.linalg.det(basis))) != 1:
+                continue
+            yield ",".join(labels), basis
+
+
+def transform_relative_basis(relative, basis):
+    transformed = relative.copy()
+    transformed[:, :3, :3] = basis[None, :, :] @ relative[:, :3, :3] @ basis.T[None, :, :]
+    transformed[:, :3, 3] = (basis @ relative[:, :3, 3].T).T
+    return transformed
+
+
+def rotation_errors_after_basis(pred_rel, gt_rel, basis):
+    pred_basis = transform_relative_basis(pred_rel, basis)
+    return rotation_error_deg(pred_basis[:, :3, :3], gt_rel[:, :3, :3])
+
+
+def best_axis_convention_metrics(pred, gt_rel, gt_points):
+    variants = {
+        "c2w": pred,
+        "inverse": np.linalg.inv(pred),
+    }
+    best = None
+    for variant_name, variant in variants.items():
+        pred_rel = relative_poses(variant)
+        for basis_name, basis in signed_permutation_bases():
+            pred_basis = transform_relative_basis(pred_rel, basis)
+            rot_errors = rotation_error_deg(pred_basis[:, :3, :3], gt_rel[:, :3, :3])
+            pred_points = pred_basis[:, :3, 3]
+            scalar = fit_scalar(pred_points, gt_points)
+            pred_scaled = scalar * pred_points
+            scale_errors = np.linalg.norm(pred_scaled - gt_points, axis=1)
+            pred_sim3, sim3_scale, _sim3_rotation, _sim3_translation = fit_umeyama_transform(
+                pred_points, gt_points
+            )
+            sim3_errors = np.linalg.norm(pred_sim3 - gt_points, axis=1)
+            candidate = {
+                "axis_convention_variant": variant_name,
+                "axis_convention_basis": basis_name,
+                "axis_convention_scale_only_factor": scalar,
+                "axis_convention_sim3_scale": sim3_scale,
+                "rotation_errors": rot_errors,
+                "scale_only_errors": scale_errors,
+                "sim3_errors": sim3_errors,
+            }
+            key = (
+                float(rot_errors.mean()),
+                float(sim3_errors.mean()),
+                float(scale_errors.mean()),
+            )
+            if best is None or key < best[0]:
+                best = (key, candidate)
+    return {} if best is None else best[1]
 
 
 def worldscore_camera_control_score(rotation_error_mean, translation_error_mean):
@@ -141,17 +212,25 @@ def score_reconstruction(reconstruction_dir, metadata):
     scalar = fit_scalar(pred_points, gt_points)
     pred_scaled = scalar * pred_points
     scale_only_errors = np.linalg.norm(pred_scaled - gt_points, axis=1)
-    pred_sim3, sim3_scale = fit_umeyama(pred_points, gt_points)
+    pred_sim3, sim3_scale, sim3_rotation, _sim3_translation = fit_umeyama_transform(
+        pred_points, gt_points
+    )
     sim3_errors = np.linalg.norm(pred_sim3 - gt_points, axis=1)
+    sim3_rot_errors = rotation_errors_after_basis(pred_rel, gt_rel, sim3_rotation)
+    axis_metrics = best_axis_convention_metrics(pred, gt_rel, gt_points)
+    axis_rot_errors = axis_metrics.get("rotation_errors")
+    axis_scale_errors = axis_metrics.get("scale_only_errors")
+    axis_sim3_errors = axis_metrics.get("sim3_errors")
 
     rotation_mean = float(rot_errors.mean())
     translation_mean = float(scale_only_errors.mean())
+    sim3_rotation_mean = float(sim3_rot_errors.mean())
     gt_path_length = path_length(gt_points)
     pred_path_length_scaled = path_length(pred_scaled)
     pred_endpoint = float(np.linalg.norm(pred_scaled[-1] - pred_scaled[0]))
     gt_endpoint = float(np.linalg.norm(gt_points[-1] - gt_points[0]))
 
-    return {
+    result = {
         "run_name": metadata["run_name"],
         "batch_idx": metadata["batch_idx"],
         "duration_sec": metadata["duration_sec"],
@@ -170,6 +249,10 @@ def score_reconstruction(reconstruction_dir, metadata):
         "translation_error_sim3_median": safe_round(percentile(sim3_errors, 0.5)),
         "translation_error_sim3_p90": safe_round(percentile(sim3_errors, 0.9)),
         "translation_error_sim3_max": safe_round(float(sim3_errors.max())),
+        "rotation_error_sim3_aligned_mean": safe_round(sim3_rotation_mean),
+        "rotation_error_sim3_aligned_median": safe_round(percentile(sim3_rot_errors, 0.5)),
+        "rotation_error_sim3_aligned_p90": safe_round(percentile(sim3_rot_errors, 0.9)),
+        "rotation_error_sim3_aligned_max": safe_round(float(sim3_rot_errors.max())),
         "endpoint_rotation_error_deg": safe_round(float(rot_errors[-1])),
         "endpoint_translation_error_scale_only": safe_round(float(scale_only_errors[-1])),
         "endpoint_translation_error_sim3": safe_round(float(sim3_errors[-1])),
@@ -187,8 +270,40 @@ def score_reconstruction(reconstruction_dir, metadata):
         "worldscore_camera_control_score": safe_round(
             worldscore_camera_control_score(rotation_mean, translation_mean)
         ),
+        "worldscore_camera_control_score_sim3_aligned": safe_round(
+            worldscore_camera_control_score(sim3_rotation_mean, float(sim3_errors.mean()))
+        ),
         "reconstruction_dir": str(reconstruction_dir),
     }
+    if axis_metrics:
+        axis_rotation_mean = float(axis_rot_errors.mean())
+        axis_translation_mean = float(axis_scale_errors.mean())
+        result.update(
+            {
+                "axis_convention_variant": axis_metrics["axis_convention_variant"],
+                "axis_convention_basis": axis_metrics["axis_convention_basis"],
+                "rotation_error_axis_aligned_mean": safe_round(axis_rotation_mean),
+                "rotation_error_axis_aligned_median": safe_round(percentile(axis_rot_errors, 0.5)),
+                "rotation_error_axis_aligned_p90": safe_round(percentile(axis_rot_errors, 0.9)),
+                "rotation_error_axis_aligned_max": safe_round(float(axis_rot_errors.max())),
+                "translation_error_axis_scale_only_mean": safe_round(axis_translation_mean),
+                "translation_error_axis_scale_only_median": safe_round(percentile(axis_scale_errors, 0.5)),
+                "translation_error_axis_scale_only_p90": safe_round(percentile(axis_scale_errors, 0.9)),
+                "translation_error_axis_scale_only_max": safe_round(float(axis_scale_errors.max())),
+                "translation_error_axis_sim3_mean": safe_round(float(axis_sim3_errors.mean())),
+                "translation_error_axis_sim3_median": safe_round(percentile(axis_sim3_errors, 0.5)),
+                "translation_error_axis_sim3_p90": safe_round(percentile(axis_sim3_errors, 0.9)),
+                "translation_error_axis_sim3_max": safe_round(float(axis_sim3_errors.max())),
+                "axis_convention_scale_only_factor": safe_round(
+                    axis_metrics["axis_convention_scale_only_factor"]
+                ),
+                "axis_convention_sim3_scale": safe_round(axis_metrics["axis_convention_sim3_scale"]),
+                "worldscore_camera_control_score_axis_aligned": safe_round(
+                    worldscore_camera_control_score(axis_rotation_mean, axis_translation_mean)
+                ),
+            }
+        )
+    return result
 
 
 def discover_metadata_files(cut3r_dir, runs=None):
@@ -228,10 +343,20 @@ def summarize_by_run(rows):
         "translation_error_scale_only_p90",
         "translation_error_sim3_mean",
         "translation_error_sim3_p90",
+        "rotation_error_sim3_aligned_mean",
+        "rotation_error_sim3_aligned_p90",
+        "rotation_error_axis_aligned_mean",
+        "rotation_error_axis_aligned_p90",
+        "translation_error_axis_scale_only_mean",
+        "translation_error_axis_scale_only_p90",
+        "translation_error_axis_sim3_mean",
+        "translation_error_axis_sim3_p90",
         "endpoint_rotation_error_deg",
         "endpoint_translation_error_scale_only",
         "loop_endpoint_distance_error",
         "worldscore_camera_control_score",
+        "worldscore_camera_control_score_sim3_aligned",
+        "worldscore_camera_control_score_axis_aligned",
     ]
     output = []
     for run_name, group in sorted(grouped.items()):
@@ -242,6 +367,10 @@ def summarize_by_run(rows):
         }
         for field in metric_fields:
             row.update(numeric_stats(field, [item.get(field) for item in group]))
+        variants = sorted({item.get("axis_convention_variant") for item in group if item.get("axis_convention_variant")})
+        bases = sorted({item.get("axis_convention_basis") for item in group if item.get("axis_convention_basis")})
+        row["axis_convention_variants"] = "|".join(variants) if variants else None
+        row["axis_convention_bases"] = "|".join(bases) if bases else None
         output.append(row)
     return output
 

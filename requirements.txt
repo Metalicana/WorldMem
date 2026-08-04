@@ -24,5 +24,6 @@ h5py
 rotary_embedding_torch
 diffusers
 timm
+transformers
 gradio
 spaces

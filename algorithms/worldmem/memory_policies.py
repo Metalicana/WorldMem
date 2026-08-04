@@ -6,12 +6,14 @@ import numpy as np
 
 SUPPORTED_MEMORY_POLICIES = (
     "unbounded",
+    "random_cap",
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
     "kcenter_coreset",
 )
 BUDGETED_MEMORY_POLICIES = (
+    "random_cap",
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
@@ -20,7 +22,13 @@ BUDGETED_MEMORY_POLICIES = (
 
 
 class FrameMemoryBuffer:
-    def __init__(self, policy="unbounded", budget=None, pinned_frames=None):
+    def __init__(
+        self,
+        policy="unbounded",
+        budget=None,
+        pinned_frames=None,
+        random_seed=0,
+    ):
         if policy not in SUPPORTED_MEMORY_POLICIES:
             raise ValueError(
                 f"Unsupported memory policy '{policy}'. "
@@ -37,6 +45,7 @@ class FrameMemoryBuffer:
         self._stats = {}
         self._next_order = 0
         self._pinned_frames = set(pinned_frames or [])
+        self._rng = np.random.default_rng(int(random_seed))
 
     def add(self, frame_idx, evict=True, eviction_scores=None, protected_frames=None):
         frame_idx = int(frame_idx)
@@ -98,6 +107,8 @@ class FrameMemoryBuffer:
 
             if self.policy == "fifo":
                 evicted_frame_idx = evictable[0]
+            elif self.policy == "random_cap":
+                evicted_frame_idx = int(self._rng.choice(evictable))
             else:
                 evicted_frame_idx = min(
                     evictable,
@@ -118,6 +129,9 @@ class FrameMemoryBuffer:
 
     def selected_count(self, frame_idx):
         return self._stats.get(int(frame_idx), {}).get("selected_count", 0)
+
+    def frame_stats(self, frame_idx):
+        return dict(self._stats.get(int(frame_idx), {}))
 
     def __len__(self):
         return len(self._frames)
@@ -163,6 +177,19 @@ def cosine_distances(features):
     features = features / np.maximum(norms, 1e-12)
     similarities = np.clip(features @ features.T, -1.0, 1.0)
     return 1.0 - similarities
+
+
+def pairwise_mean_abs_distances(features):
+    features = np.asarray(features, dtype=np.float64)
+    num_items = len(features)
+    distances = np.zeros((num_items, num_items), dtype=np.float64)
+    for index in range(num_items):
+        if index + 1 >= num_items:
+            continue
+        row = np.mean(np.abs(features[index + 1 :] - features[index]), axis=1)
+        distances[index, index + 1 :] = row
+        distances[index + 1 :, index] = row
+    return distances
 
 
 def connected_components_from_threshold(pairwise_distances, threshold):
@@ -216,18 +243,30 @@ def _feature_matrix(memory_frame_indices, features):
 
 def compute_rarity_irreplaceability_scores(
     memory_frame_indices,
-    latent_features,
+    latent_features=None,
     pinned_frames=None,
     return_details=False,
+    rarity_features=None,
+    irreplaceability_features=None,
+    irreplaceability_metric="cosine",
 ):
     memory_frame_indices = list(memory_frame_indices)
     pinned_frames = set(pinned_frames or [])
     if not memory_frame_indices:
         return ({}, {}) if return_details else {}
 
-    feature_matrix = _feature_matrix(memory_frame_indices, latent_features)
-    pairwise = cosine_distances(feature_matrix)
-    np.fill_diagonal(pairwise, np.inf)
+    if rarity_features is None:
+        rarity_features = latent_features
+    if rarity_features is None:
+        raise ValueError("RI requires latent_features or rarity_features")
+    if irreplaceability_features is None:
+        irreplaceability_features = rarity_features
+    if irreplaceability_metric not in {"cosine", "mean_abs"}:
+        raise ValueError("irreplaceability_metric must be 'cosine' or 'mean_abs'")
+
+    rarity_matrix = _feature_matrix(memory_frame_indices, rarity_features)
+    rarity_pairwise = cosine_distances(rarity_matrix)
+    np.fill_diagonal(rarity_pairwise, np.inf)
 
     if len(memory_frame_indices) == 1:
         cluster_ids = np.zeros(1, dtype=np.int64)
@@ -236,16 +275,29 @@ def compute_rarity_irreplaceability_scores(
         nearest_distances = np.ones(1, dtype=np.float64)
         nearest_indices = np.full(1, -1, dtype=np.int64)
     else:
-        threshold = estimate_cluster_threshold(pairwise)
-        cluster_pairwise = pairwise.copy()
+        threshold = estimate_cluster_threshold(rarity_pairwise)
+        cluster_pairwise = rarity_pairwise.copy()
         np.fill_diagonal(cluster_pairwise, 0.0)
         cluster_ids, clusters = connected_components_from_threshold(
             cluster_pairwise,
             threshold=threshold,
         )
         cluster_sizes = np.array([len(clusters[cluster_id]) for cluster_id in cluster_ids])
-        nearest_indices = np.argmin(pairwise, axis=1)
-        nearest_distances = pairwise[np.arange(len(memory_frame_indices)), nearest_indices]
+        irreplaceability_matrix = _feature_matrix(
+            memory_frame_indices,
+            irreplaceability_features,
+        )
+        if irreplaceability_metric == "mean_abs":
+            irreplaceability_pairwise = pairwise_mean_abs_distances(
+                irreplaceability_matrix
+            )
+        else:
+            irreplaceability_pairwise = cosine_distances(irreplaceability_matrix)
+        np.fill_diagonal(irreplaceability_pairwise, np.inf)
+        nearest_indices = np.argmin(irreplaceability_pairwise, axis=1)
+        nearest_distances = irreplaceability_pairwise[
+            np.arange(len(memory_frame_indices)), nearest_indices
+        ]
 
     memory_count = float(len(memory_frame_indices))
     rarity = np.log((memory_count + 1.0) / np.maximum(cluster_sizes, 1.0))
@@ -271,6 +323,7 @@ def compute_rarity_irreplaceability_scores(
                 else int(memory_frame_indices[int(nearest_indices[index])])
             ),
             "nearest_distance": float(nearest_distances[index]),
+            "irreplaceability_metric": irreplaceability_metric,
         }
     return (scores, details) if return_details else scores
 

@@ -1249,6 +1249,37 @@ print(df.to_string(index=False))
 PY
 ```
 
+If the initial GT sanity table shows zero `worldscore_camera_control_score` and huge rotation errors, rerun only the evaluator after syncing the latest `utils/evaluate_cut3r_worldmem_camera_metrics.py`; it adds Sim(3)-aligned and camera-axis-convention diagnostic columns without rerunning CUT3R:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+python utils/evaluate_cut3r_worldmem_camera_metrics.py \
+  --cut3r_dir /data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_pose_recon_gt_sanity \
+  --output_dir /data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_camera_metrics_gt_sanity \
+  --runs worldmem_gt_sanity_60s_n1 \
+  --duration_sec 60
+
+cd /data/ab575577/worldmem/outputs/memory_policy/metrics/cut3r_camera_metrics_gt_sanity
+python - <<'PY'
+import pandas as pd
+df = pd.read_csv("cut3r_camera_summary.csv")
+cols = [
+    "run_name",
+    "videos",
+    "rotation_error_deg_mean_mean",
+    "rotation_error_sim3_aligned_mean_mean",
+    "rotation_error_axis_aligned_mean_mean",
+    "translation_error_sim3_mean_mean",
+    "translation_error_axis_sim3_mean_mean",
+    "axis_convention_variants",
+    "axis_convention_bases",
+]
+print(df[cols].to_string(index=False))
+PY
+```
+
 ```bash
 cd ~/WorldMem
 conda activate worldmem
@@ -1353,6 +1384,409 @@ Outputs:
 ```
 
 Use `revisit_pairs.csv` as the candidate set for later pixel/LPIPS/L2 matching. If this scan finds few or no pairs, then the WorldMem Minecraft test set is weak for a revisit-place metric and CUT3R/trajectory consistency should carry more of the geometry story.
+
+## Why Bounded Memory Beats Unbounded: Diagnostic Plan
+
+### WorldMem RI Currently Uses Latent Features, Not DINO
+
+The WorldMem `rarity_irreplaceability` implementation is a latent-native adaptation of the MemCam policy. It should be labeled `Latent-RI` in analysis and paper figures unless the decoded-DINO backend described below is enabled.
+
+For each candidate frame, WorldMem takes the generated VAE latent from `xs_pred`, average-pools its spatial map to `4 x 4`, flattens it, and moves the resulting vector to CPU. With the default 16-channel VAE latent, this is a 256-dimensional descriptor:
+
+```text
+generated latent z_t [16, H_latent, W_latent]
+  -> adaptive average pool [16, 4, 4]
+  -> flatten [256]
+  -> cosine-distance matrix across retained candidates
+```
+
+RI then computes:
+
+```text
+rarity_i = log((N + 1) / cluster_size_i)
+irreplaceability_i = cosine_distance(i, nearest_neighbor_i)
+keep_score_i = rarity_i * irreplaceability_i
+```
+
+The lowest-scoring non-pinned frame is evicted. Both rarity and irreplaceability therefore come from the same pooled-latent cosine space.
+
+MemCam's implementation is different. It decodes/generates RGB frames, passes them through frozen `facebook/dinov2-base`, L2-normalizes the pooled/CLS feature, and uses DINO cosine distance for rarity. It separately downsamples RGB to `64 x 64` and uses nearest-neighbor mean absolute RGB distance for irreplaceability.
+
+To reproduce MemCam-style RI in WorldMem, do not feed VAE latents directly to DINO. DINO expects normalized RGB images. The correct online path is:
+
+```text
+scaled WorldMem latent z_t
+  -> WorldMem VAE decode using z_t / 0.07843137255
+  -> RGB in [0, 1]
+  -> DINO image processor
+  -> frozen DINOv2 pooled/CLS feature
+  -> L2 normalize and cache the feature on CPU by frame index
+```
+
+Decode and embed only newly generated frames after each chunk, then reuse cached descriptors while those frames remain in the bank. For the exact MemCam RI equation, also cache the `64 x 64` RGB descriptor. Keep this as a separate backend rather than silently changing existing results:
+
+```text
+MEMORY_FEATURE_BACKEND=latent       # current WorldMem Latent-RI
+MEMORY_FEATURE_BACKEND=dino         # DINO for both terms
+MEMORY_FEATURE_BACKEND=dino_rgb     # MemCam-exact DINO rarity + RGB irreplaceability
+```
+
+### What the Existing Result Establishes
+
+The existing first-15-video results show the phenomenon that needs explaining:
+
+- At 60 seconds, unbounded LPIPS is `0.652269`; SLAM b16 is `0.524506`.
+- At 60 seconds, unbounded FVD is `3077.600`; SLAM b16 is `1041.757`.
+- RI and SLAM beat unbounded across the tested budgets, while FIFO is inconsistent.
+
+This is descriptive evidence, not yet a causal explanation. WorldMem retrieves only eight memory frames for each chunk under every policy. The policy changes the storage/candidate set seen by the same FOV retriever. Unbounded therefore means more candidates, not more conditioning slots.
+
+The diagnostic runner now sets both `dataset.seed` and the top-level Hydra `seed`, then derives a deterministic seed from the base seed and global video index. This keeps dataset order, initial context, diffusion noise, and FOV point samples paired across policies, including after a resumed run. Report paired per-video differences and cluster-bootstrap confidence intervals rather than comparing unrelated run means.
+
+### Mechanisms to Test
+
+1. **Candidate competition:** As the unbounded bank grows, a noisy pose/FOV score is maximized over more candidates. The probability of a high-scoring false positive grows even though only eight frames are retrieved.
+2. **Bad-memory feedback:** Generated frames with large same-timestep GT error remain eligible forever. Retrieval is pose-based and does not inspect visual quality, so a corrupted frame can condition later chunks and amplify drift.
+3. **Redundancy:** Dense runs of adjacent frames can crowd the candidate bank without adding coverage. Bounded policies may act as a diversity regularizer.
+4. **Stale reference conflict:** Old frames can have high geometric overlap but depict a state inconsistent with the current generated world. The existing age penalty has magnitude at most `0.2`, so overlap can dominate it.
+5. **Feature-space selection:** RI/SLAM may win because their descriptors preserve useful coverage, or simply because any candidate cap suppresses false positives. A random-cap control separates these stories.
+
+### Experiment 0: Paired Reproduction
+
+Run the same videos and global seeds for `unbounded`, `random_cap`, `fifo`, `Latent-RI`, and `SLAM`. Start with 5 videos x 3 seeds, then expand the decisive variants to 15 videos. Save per-video, per-prefix LPIPS plus every retrieval/eviction trace. FVD remains a run-level beauty metric and should not be used to diagnose individual retrieval events.
+
+Primary figure: paired per-video LPIPS difference from unbounded at 10/20/30/60 seconds, with bootstrap 95% intervals. A slope/raincloud view is more informative than another table of means.
+
+### Experiment 1: Candidate-Count Dose Response
+
+Keep the full history stored, but uniformly subsample the candidate set before the original WorldMem retriever. Test candidate caps `16, 32, 64, 128, 256, 512, all` with fixed noise. Include RI and SLAM at comparable budgets.
+
+This is the cleanest test of the main hypothesis. If random candidate caps already improve quality, unbounded suffers from candidate competition. If only RI/SLAM improve, selection quality and coverage are doing the work.
+
+Primary figure: x-axis candidate count on a log scale; y-axis paired 60-second LPIPS. Show random-cap as a dose-response curve, unbounded as the rightmost point, and RI/SLAM as labeled policy points. Add a second panel for retrieval time.
+
+### Experiment 2: Retrieval Pollution and Feedback
+
+For every generated memory frame `i`, compute insertion quality against the aligned GT frame:
+
+```text
+memory_error_i = LPIPS(decode(z_i), GT_i)
+```
+
+For every generated chunk `t`, compute:
+
+```text
+selected_memory_error_t = mean(memory_error_i for i in retrieved_set_t)
+next_chunk_error_t = LPIPS(predicted_chunk_t, GT_chunk_t)
+```
+
+Analyze whether selected-memory error predicts next-chunk error after controlling for horizon, video, and seed. Also record candidate count, selected age, FOV confidence, DINO/latent diversity, and the fraction of selected frames above a fixed memory-error threshold.
+
+Primary figure: a four-panel causal-chain plot over horizon: bank size, selected-memory error, next-chunk LPIPS, and cumulative exposure to bad memories. Add a per-chunk scatter of selected-memory error versus next-chunk error with separate policy fits.
+
+### Experiment 3: Confidence Versus Actual Utility
+
+Instrument all or a bounded diagnostic sample of candidates, not only selected frames. For each chunk, save the WorldMem FOV confidence, age, overlap, and a post-hoc relevance score to the upcoming GT chunk. DINO similarity can provide a cheap relevance proxy, but it is not a causal oracle.
+
+For a small subset of videos/chunks, run fixed-noise counterfactual generation while replacing one retrieved frame at a time. Define candidate utility as the change in next-chunk LPIPS caused by including that frame. This gives a model-in-the-loop retrieval oracle.
+
+Primary figures:
+
+- Spearman correlation between FOV confidence and counterfactual utility as the bank grows.
+- Retrieval regret over horizon: oracle set LPIPS minus actual selected-set LPIPS, plotted with the sign labeled clearly.
+- Scatter of FOV confidence versus actual utility, highlighting high-confidence harmful memories.
+
+### Experiment 4: Memory Composition and Redundancy
+
+At each chunk, measure bank and retrieved-set composition in both pooled-latent and decoded-DINO space:
+
+- mean nearest-neighbor distance;
+- effective number of clusters;
+- pairwise pose coverage;
+- frame-age distribution;
+- fraction of context versus generated memories;
+- fraction of high-error generated memories;
+- retrieval concentration and repeated-selection count.
+
+Primary figures:
+
+- Retention/retrieval heatmap: source frame on x, generation chunk on y, with retained and retrieved frames distinguished. Use one panel per policy.
+- DINO/pose coverage versus LPIPS scatter at the video-chunk grain.
+- Retrieved-frame age distributions as box plots by policy and horizon.
+
+A UMAP with frame thumbnails can be included as a qualitative figure, but it should not carry the mechanism claim by itself.
+
+### Experiment 5: RI Feature-Backend Ablation
+
+Compare at one decisive budget, initially b32:
+
+```text
+Latent-RI         current pooled WorldMem latent for both terms
+DINO-RI           decoded DINO feature for both terms
+DINO+RGB-RI       MemCam-exact DINO rarity and RGB irreplaceability
+Pose-only         geometry control
+Random-cap        candidate-count control
+```
+
+Report LPIPS/FVD, memory-update latency, total inference latency, CPU descriptor memory, and peak GPU memory. DINO extraction cost must be included in the runtime result.
+
+Primary figure: a Pareto scatter with 60-second LPIPS on y and added policy/update latency on x; marker size can encode descriptor memory. Use a separate grouped bar for the feature-backend ablation if the scatter becomes crowded.
+
+### Experiment 6: Teacher-Forced Isolation
+
+Build all policies from GT-encoded past frames while keeping target actions/poses fixed. This removes recursive generation drift and asks whether the policy retains geometrically and visually useful past observations. Then repeat free-running generation.
+
+Interpretation:
+
+- If bounded wins under teacher forcing, candidate selection itself is better.
+- If policies are similar under teacher forcing but bounded wins free-running, the main mechanism is bad-memory feedback suppression.
+
+Primary figure: paired effect size for each policy in teacher-forced versus free-running mode. This is the strongest single graphic for separating retrieval quality from drift control.
+
+### Required Trace Additions
+
+The current trace already records selected frame, candidate count, overlap, confidence, age-related frame indices, eviction scores, and runtime. Add the following for diagnostic runs:
+
+```text
+global_seed, per_video_seed
+chunk_start, chunk_end
+candidate_frame, candidate_rank, candidate_overlap, candidate_confidence
+selected_memory_age
+memory_error_at_insertion
+latent_feature_nn_distance, dino_feature_nn_distance
+bank_cluster_count, retrieved_set_diversity
+source_is_initial_context
+```
+
+Full candidate rows can be large, so enable them only with a diagnostic flag or retain the top K plus a uniform candidate sample.
+
+### Decision Logic
+
+- Random cap beats unbounded: bounded candidate count is a regularizer against noisy retrieval.
+- RI/SLAM beat random cap: structured coverage and diversity add value beyond pruning.
+- Selected-memory error predicts next-chunk error and the intervention confirms it: bounded memory prevents error feedback.
+- DINO+RGB-RI beats Latent-RI: semantic descriptors matter and the MemCam method transfers.
+- Latent-RI matches DINO+RGB-RI: WorldMem's VAE latent is already sufficient, giving a cheaper method.
+- Gains disappear under paired seeds: the existing result was dominated by stochastic variation and must not be presented as a policy effect.
+
+CUT3R should remain outside this causal diagnostic until its GT sanity run yields sensible camera errors. Its current failure on GT Minecraft frames means it cannot validate why one memory policy is better.
+
+### Implemented Diagnostic Suite
+
+The runnable suite is split into generation and offline analysis:
+
+```text
+scripts/run_worldmem_memory_mechanisms.sh
+scripts/analyze_worldmem_memory_mechanisms.sh
+utils/analyze_worldmem_memory_mechanisms.py
+```
+
+The generation runner is resumable per video and supports:
+
+- paired global and per-video seeds;
+- full unbounded memory;
+- retrieval-only candidate caps that keep the full bank but uniformly limit the retriever's candidate set;
+- random bounded-bank retention;
+- Latent-RI and SLAM retention;
+- predicted-memory and GT-memory reference sources;
+- Latent-RI, DINO-RI, and MemCam-style DINO+RGB-RI;
+- candidate, retrieval, eviction, bank-state, runtime, and memory-device traces.
+
+The offline analyzer aligns every generated video with its GT test video and writes per-frame MSE/LPIPS caches, per-prefix paired effects, retrieval-pollution tables, runtime summaries, candidate calibration data, and static PNG figures. Its bootstrap resamples source videos, so multiple seeds of the same Minecraft trajectory are not counted as independent videos.
+
+#### CECSL GPU 0: One-Video Pilot
+
+This is the first command to run. It covers unbounded, retrieval-only caps, a random b32 bank, Latent-RI b32, and SLAM b32. At roughly 12 minutes per 60-second video, this ten-run pilot is approximately a two-hour job on one GPU.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_diagnostics/pilot \
+NUM_VIDEOS=1 \
+SEEDS=101 \
+FUTURE_SECONDS=60 \
+CANDIDATE_CAPS=16,32,64,128,256,512 \
+RANDOM_BANK_BUDGETS=32 \
+SMART_POLICIES=rarity_irreplaceability,slam_covisibility \
+SMART_BUDGETS=32 \
+REFERENCE_SOURCES=predicted \
+bash scripts/run_worldmem_memory_mechanisms.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/memory_mechanism_pilot_gpu0_$(date +%F_%H%M).log
+```
+
+Each output is written under:
+
+```text
+/data/ab575577/worldmem/outputs/memory_diagnostics/pilot/worldmem_diag_*
+```
+
+The key distinction in run names is:
+
+```text
+unbounded_candidatecap32   full bank, 32 candidates exposed to retrieval
+random_cap_b32             only 32 randomly retained memory frames
+rarity_irreplaceability_b32
+slam_covisibility_b32
+```
+
+#### Analyze Any Completed Pilot
+
+The analysis is resumable because per-frame errors are cached. `LIMIT=1` is useful as an analyzer smoke test; remove it to analyze every completed video.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_diagnostics/pilot \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_diagnostics/pilot/mechanism_analysis \
+FUTURE_SECONDS=60 \
+PREFIX_SECONDS=10,20,30,60 \
+bash scripts/analyze_worldmem_memory_mechanisms.sh
+```
+
+Primary outputs:
+
+```text
+/data/ab575577/worldmem/outputs/memory_diagnostics/pilot/mechanism_analysis/run_summary.csv
+/data/ab575577/worldmem/outputs/memory_diagnostics/pilot/mechanism_analysis/paired_effects.csv
+/data/ab575577/worldmem/outputs/memory_diagnostics/pilot/mechanism_analysis/chunk_diagnostics.csv
+/data/ab575577/worldmem/outputs/memory_diagnostics/pilot/mechanism_analysis/candidate_diagnostics.csv
+/data/ab575577/worldmem/outputs/memory_diagnostics/pilot/mechanism_analysis/figures/
+```
+
+The main figures are:
+
+```text
+candidate_count_vs_lpips.png
+paired_lpips_over_horizon.png
+paired_lpips_effects.png
+mechanism_over_horizon.png
+memory_feedback_scatter.png
+confidence_vs_memory_error.png
+retention_heatmap.png
+quality_vs_policy_overhead.png
+```
+
+#### Paired Confirmation
+
+After the pilot, keep the two or three candidate caps that define the dose-response curve and run `5 videos x 3 seeds`. The command below uses caps 32, 128, and 512, plus the random and structured b32 controls.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_diagnostics/paired_confirm \
+NUM_VIDEOS=5 \
+SEEDS=101,202,303 \
+FUTURE_SECONDS=60 \
+CANDIDATE_CAPS=32,128,512 \
+RANDOM_BANK_BUDGETS=32 \
+SMART_POLICIES=rarity_irreplaceability,slam_covisibility \
+SMART_BUDGETS=32 \
+REFERENCE_SOURCES=predicted \
+bash scripts/run_worldmem_memory_mechanisms.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/memory_mechanism_confirm_gpu0_$(date +%F_%H%M).log
+```
+
+After the selected confirmation runs finish, compute FVD across every diagnostic run in that experiment root. The wrapper auto-discovers `worldmem_diag_*` directories:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_diagnostics/paired_confirm \
+EVAL_DURATIONS=10,20,30,60 \
+LIMIT=15 \
+bash scripts/evaluate_worldmem_memory_mechanism_fvd.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/memory_mechanism_fvd_gpu0_$(date +%F_%H%M).log
+```
+
+Use LPIPS for paired per-video mechanism claims. Use FVD as a distribution-level quality outcome with the exact clip count, stride, duration, and number of source videos reported beside it.
+
+#### Teacher-Forced Isolation
+
+This uses GT-encoded past memories while generation itself remains free-running. It tests whether bounded selection is intrinsically better when corrupted generated memories are removed from the bank.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_diagnostics/teacher_forced \
+NUM_VIDEOS=5 \
+SEEDS=101,202,303 \
+FUTURE_SECONDS=60 \
+REFERENCE_SOURCES=ground_truth \
+RUN_CANDIDATE_CAPS=0 \
+RUN_RANDOM_BANK=0 \
+RUN_SMART_POLICIES=1 \
+SMART_POLICIES=rarity_irreplaceability,slam_covisibility \
+SMART_BUDGETS=32 \
+bash scripts/run_worldmem_memory_mechanisms.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/memory_teacher_forced_gpu0_$(date +%F_%H%M).log
+```
+
+Interpret predicted versus GT-reference results together. If the bounded advantage collapses with GT memories, bad-memory feedback is the likely mechanism. If it persists, candidate competition or retained coverage is likely more important.
+
+#### RI Feature-Backend Ablation
+
+`dino` decodes WorldMem latents to RGB and uses normalized DINOv2 features for both terms. `dino_rgb` uses DINOv2 for rarity and 64 x 64 RGB mean absolute distance for irreplaceability, matching the MemCam representation split. The descriptors are cached by frame index; DINO extraction time is included in `memory_update_seconds`.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_diagnostics/dino_ablation \
+NUM_VIDEOS=5 \
+SEEDS=101,202,303 \
+FUTURE_SECONDS=60 \
+RUN_CANDIDATE_CAPS=0 \
+RUN_RANDOM_BANK=0 \
+RUN_SMART_POLICIES=0 \
+RUN_DINO_ABLATION=1 \
+DINO_BACKENDS=latent,dino,dino_rgb \
+DINO_BUDGET=32 \
+REFERENCE_SOURCES=predicted \
+bash scripts/run_worldmem_memory_mechanisms.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/memory_dino_ablation_gpu0_$(date +%F_%H%M).log
+```
+
+The first DINO run downloads `facebook/dinov2-base` through `transformers`. On CECSL, keep the Hugging Face cache under `/data/ab575577/worldmem/hf_cache`. On Newton, set `WORLDMEM_STORAGE_ROOT` to a normal cluster path and do not use `/data/ab575577`.
+
+#### Newton
+
+The scripts automatically avoid `/data/ab575577` when it does not exist. It is still better to set an explicit Newton storage path:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=$SCRATCH/worldmem \
+WORLDMEM_DATA_DIR=$SCRATCH/worldmem/data/minecraft \
+NUM_VIDEOS=1 \
+SEEDS=101 \
+bash scripts/run_worldmem_memory_mechanisms.sh
+```
 
 ## Common Issues
 

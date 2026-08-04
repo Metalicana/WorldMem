@@ -16,6 +16,21 @@ fi
 MEMORY_POLICY="${MEMORY_POLICY:-unbounded}"
 MEMORY_BUDGET="${MEMORY_BUDGET:-}"
 MEMORY_BANK_DEVICE="${MEMORY_BANK_DEVICE:-cpu}"
+MEMORY_REFERENCE_SOURCE="${MEMORY_REFERENCE_SOURCE:-predicted}"
+MEMORY_FEATURE_BACKEND="${MEMORY_FEATURE_BACKEND:-latent}"
+MEMORY_FEATURE_DEVICE="${MEMORY_FEATURE_DEVICE:-auto}"
+MEMORY_DINO_MODEL_NAME="${MEMORY_DINO_MODEL_NAME:-facebook/dinov2-base}"
+MEMORY_FEATURE_BATCH_SIZE="${MEMORY_FEATURE_BATCH_SIZE:-16}"
+DATASET_SEED="${DATASET_SEED:-42}"
+GLOBAL_SEED="${GLOBAL_SEED:-42}"
+GENERATION_SEED="${GENERATION_SEED:-$GLOBAL_SEED}"
+MEMORY_POLICY_SEED="${MEMORY_POLICY_SEED:-$GLOBAL_SEED}"
+RETRIEVAL_CANDIDATE_CAP="${RETRIEVAL_CANDIDATE_CAP:-}"
+TRACE_CANDIDATE_DIAGNOSTICS="${TRACE_CANDIDATE_DIAGNOSTICS:-false}"
+TRACE_CANDIDATE_TOP_K="${TRACE_CANDIDATE_TOP_K:-16}"
+TRACE_CANDIDATE_SAMPLE_SIZE="${TRACE_CANDIDATE_SAMPLE_SIZE:-16}"
+TRACE_BANK_STATE="${TRACE_BANK_STATE:-false}"
+TRACE_BANK_MAX_FRAMES="${TRACE_BANK_MAX_FRAMES:-256}"
 KCENTER_ARCHIVE_STRIDE="${KCENTER_ARCHIVE_STRIDE:-1}"
 KCENTER_VISUAL_WEIGHT="${KCENTER_VISUAL_WEIGHT:-0.5}"
 KCENTER_POSE_WEIGHT="${KCENTER_POSE_WEIGHT:-0.5}"
@@ -38,7 +53,7 @@ RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGE
 OUTPUT_DIR="${OUTPUT_DIR:-$STORAGE_ROOT/outputs/memory_policy/$RUN_NAME}"
 TRACE_PATH="${TRACE_PATH:-$OUTPUT_DIR/access_traces/$RUN_NAME.jsonl}"
 
-if { [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ]; } && [ -z "$MEMORY_BUDGET" ]; then
+if { [ "$MEMORY_POLICY" = "random_cap" ] || [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ]; } && [ -z "$MEMORY_BUDGET" ]; then
   echo "MEMORY_BUDGET is required when MEMORY_POLICY=$MEMORY_POLICY" >&2
   exit 2
 fi
@@ -49,8 +64,10 @@ if [ ! -f main.py ]; then
   echo "Set WORLDMEM_REPO_ROOT to the WorldMem repository path, not the storage path." >&2
   exit 2
 fi
-mkdir -p "$OUTPUT_DIR" "$(dirname "$TRACE_PATH")" "$STORAGE_ROOT/tmp"
+mkdir -p "$OUTPUT_DIR" "$(dirname "$TRACE_PATH")" "$STORAGE_ROOT/tmp" "$STORAGE_ROOT/hf_cache"
 export TMPDIR="${TMPDIR:-$STORAGE_ROOT/tmp}"
+export HF_HOME="${HF_HOME:-$STORAGE_ROOT/hf_cache}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 export WANDB_MODE="${WANDB_MODE:-disabled}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-0}"
@@ -144,9 +161,10 @@ fi
 
 cmd=(
   python -m main +name="$RUN_NAME"
+  +seed="$GLOBAL_SEED"
   experiment.tasks=[test]
   dataset.validation_multiplier=1
-  +dataset.seed=42
+  +dataset.seed="$DATASET_SEED"
   +diffusion_model_path=zeqixiao/worldmem_checkpoints/diffusion_only.ckpt
   +vae_path=zeqixiao/worldmem_checkpoints/vae_only.ckpt
   +customized_load=true
@@ -178,6 +196,18 @@ cmd=(
   wandb.entity=local
   +algorithm.memory_policy="$MEMORY_POLICY"
   +algorithm.memory_bank_device="$MEMORY_BANK_DEVICE"
+  +algorithm.memory_reference_source="$MEMORY_REFERENCE_SOURCE"
+  +algorithm.memory_feature_backend="$MEMORY_FEATURE_BACKEND"
+  +algorithm.memory_feature_device="$MEMORY_FEATURE_DEVICE"
+  +algorithm.memory_dino_model_name="$MEMORY_DINO_MODEL_NAME"
+  +algorithm.memory_feature_batch_size="$MEMORY_FEATURE_BATCH_SIZE"
+  +algorithm.generation_seed="$GENERATION_SEED"
+  +algorithm.memory_policy_seed="$MEMORY_POLICY_SEED"
+  +algorithm.trace_candidate_diagnostics="$TRACE_CANDIDATE_DIAGNOSTICS"
+  +algorithm.trace_candidate_top_k="$TRACE_CANDIDATE_TOP_K"
+  +algorithm.trace_candidate_sample_size="$TRACE_CANDIDATE_SAMPLE_SIZE"
+  +algorithm.trace_bank_state="$TRACE_BANK_STATE"
+  +algorithm.trace_bank_max_frames="$TRACE_BANK_MAX_FRAMES"
   +algorithm.kcenter_archive_stride="$KCENTER_ARCHIVE_STRIDE"
   +algorithm.kcenter_visual_weight="$KCENTER_VISUAL_WEIGHT"
   +algorithm.kcenter_pose_weight="$KCENTER_POSE_WEIGHT"
@@ -189,6 +219,9 @@ cmd=(
 if [ -n "$MEMORY_BUDGET" ]; then
   cmd+=(+algorithm.memory_budget="$MEMORY_BUDGET")
 fi
+if [ -n "$RETRIEVAL_CANDIDATE_CAP" ]; then
+  cmd+=(+algorithm.retrieval_candidate_cap="$RETRIEVAL_CANDIDATE_CAP")
+fi
 
 echo "WorldMem repo root: $WORLDMEM_REPO_ROOT"
 echo "Storage root: $STORAGE_ROOT"
@@ -196,6 +229,16 @@ echo "Data dir: $DATA_DIR"
 echo "Memory policy: $MEMORY_POLICY"
 echo "Memory budget: ${MEMORY_BUDGET:-none}"
 echo "Memory bank device: $MEMORY_BANK_DEVICE"
+echo "Memory reference source: $MEMORY_REFERENCE_SOURCE"
+echo "Memory feature backend: $MEMORY_FEATURE_BACKEND"
+echo "Memory feature device: $MEMORY_FEATURE_DEVICE"
+echo "Dataset seed: $DATASET_SEED"
+echo "Global seed: $GLOBAL_SEED"
+echo "Per-video generation seed base: $GENERATION_SEED"
+echo "Memory policy seed: $MEMORY_POLICY_SEED"
+echo "Retrieval candidate cap: ${RETRIEVAL_CANDIDATE_CAP:-none}"
+echo "Trace candidate diagnostics: $TRACE_CANDIDATE_DIAGNOSTICS"
+echo "Trace bank state: $TRACE_BANK_STATE"
 echo "K-center archive stride: $KCENTER_ARCHIVE_STRIDE"
 echo "K-center visual weight: $KCENTER_VISUAL_WEIGHT"
 echo "K-center pose weight: $KCENTER_POSE_WEIGHT"

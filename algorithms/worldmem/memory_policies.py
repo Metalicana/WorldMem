@@ -11,6 +11,7 @@ SUPPORTED_MEMORY_POLICIES = (
     "rarity_irreplaceability",
     "slam_covisibility",
     "kcenter_coreset",
+    "mce",
 )
 BUDGETED_MEMORY_POLICIES = (
     "random_cap",
@@ -18,6 +19,7 @@ BUDGETED_MEMORY_POLICIES = (
     "rarity_irreplaceability",
     "slam_covisibility",
     "kcenter_coreset",
+    "mce",
 )
 
 
@@ -601,6 +603,235 @@ def compute_kcenter_coreset_scores(
             "kcenter_visual_weight": float(visual_weight if use_visual else 0.0),
             "kcenter_pose_weight": float(pose_weight),
             "kcenter_time_weight": float(time_weight),
+        }
+
+    return (scores, details) if return_details else scores
+
+
+def _historical_query_medoids(memory_frame_indices, latent_features):
+    """Cluster candidates by content-feature similarity and return one medoid per cluster.
+
+    Reuses the same clustering primitives as ``compute_rarity_irreplaceability_scores``
+    so "distinct scene content" means the same thing across policies. Each cluster
+    contributes exactly one query point regardless of its size -- a region visited
+    many times must not outweigh a rare region in the coverage objective (that is
+    what lets MCE beat a "concentrate on frequently-reused anchors" heuristic).
+    """
+    memory_frame_indices = list(memory_frame_indices)
+    if len(memory_frame_indices) == 1:
+        return memory_frame_indices
+
+    feature_matrix = _feature_matrix(memory_frame_indices, latent_features)
+    pairwise = cosine_distances(feature_matrix)
+    np.fill_diagonal(pairwise, np.inf)
+    threshold = estimate_cluster_threshold(pairwise)
+
+    cluster_pairwise = pairwise.copy()
+    np.fill_diagonal(cluster_pairwise, 0.0)
+    _, clusters = connected_components_from_threshold(cluster_pairwise, threshold=threshold)
+
+    medoid_positions = []
+    for members in clusters:
+        if len(members) == 1:
+            medoid_positions.append(members[0])
+            continue
+        sub_distances = cluster_pairwise[np.ix_(members, members)]
+        total_distance = sub_distances.sum(axis=1)
+        medoid_positions.append(members[int(np.argmin(total_distance))])
+
+    return [memory_frame_indices[position] for position in medoid_positions]
+
+
+def compute_marginal_coverage_eviction_scores(
+    memory_frame_indices,
+    c2ws,
+    budget,
+    pinned_frames=None,
+    latent_features=None,
+    alpha=0.65,
+    return_details=False,
+):
+    """Marginal Coverage Eviction (MCE): write-path noisy-OR set-coverage eviction.
+
+    This is a bounded-memory *eviction* policy, not a retrieval rule: given the
+    full prospective candidate pool (current memory plus newly admitted frames)
+    it decides which frames to keep so the retained set best covers the scene
+    content already generated.
+
+    Objective. Each query q (see below) has weight w_q (sum to 1) and each
+    candidate m has a kernel K(q, m) in [0, 1]. Retaining set M gives coverage
+
+        U(M) = sum_q w_q * (1 - prod_{m in M} (1 - K(q, m)))
+
+    -- a standard noisy-OR / probabilistic-set-cover construction (monotone
+    submodular), not new math here. The exact marginal loss of removing item i
+    from pool P is
+
+        Delta_i(P) = sum_q w_q * K(q, i) * prod_{x in P \\ {i}} (1 - K(q, x))
+
+    Query set: historical-only (Q_hist), no anticipated-future term. An earlier
+    version of this method mixed in a Q_ctrl term for a known future camera
+    path; it is deliberately dropped here. Two reasons: (1) empirically the
+    historical-only configuration matched or beat future-weighted variants on
+    LPIPS / pose-reconstruction ATE at bounded budget; (2) this is an online
+    setting -- the future state sequence is only revealed incrementally, so
+    committing coverage weight to one anticipated continuation is a point bet
+    that is wasted if wrong, whereas covering diverse *past* content hedges
+    against whatever comes next. Q_hist is built by clustering the candidates
+    by content-feature similarity (one connected-components cluster per
+    distinct scene mode) and taking one medoid per cluster as a query, weighted
+    uniformly (not by cluster size) -- see ``_historical_query_medoids``.
+
+    Kernel: an explicit convex combination, not a product,
+
+        K(q, m) = alpha * K_geo(q, m) + (1 - alpha) * K_vis(q, m)
+
+    so that strong agreement on one cue (e.g. K_geo = 1 for a near-identical
+    camera pose) is not zeroed out by a weak second cue. K_geo reuses this
+    file's existing pose-distance-to-similarity convention (``exp(-pose
+    distance)``, the same transform ``compute_slam_covisibility_scores`` uses)
+    since WorldMem's memory is camera-pose indexed via ``c2ws``. K_vis is
+    cosine similarity between ``latent_features`` (whichever content embedding
+    ``memory_feature_backend`` produced -- DINO features give the most
+    semantically meaningful K_vis; raw VAE latents work but are a weaker cue),
+    calibrated from [-1, 1] to [0, 1]. Pass ``alpha=0`` to drop K_geo entirely
+    (e.g. for a state representation with no meaningful pose notion).
+
+    Algorithm: reverse deletion (Algorithm 1), not forward-greedy addition.
+    Starting from the full candidate pool, repeatedly evict
+    argmin_i Delta_i(P) until |P| <= budget, recomputing exact marginals after
+    each removal. This is the natural fit for a write-path policy that already
+    holds a full candidate set and must shrink it -- it does *not* carry the
+    classic offline forward-greedy (1 - 1/e) approximation guarantee, which is
+    a different algorithm; treat this as a well-motivated heuristic, not a
+    proven bound, unless a streaming/deletion-robust submodular bound is
+    established for this setting.
+
+    Efficiency: the running product P_q = prod_{m in P} (1 - K(q, m)) is
+    cached once per pool and updated by division on each eviction rather than
+    recomputed from scratch, giving O(budget * |Q|) total work instead of
+    O(budget^2 * |Q|). Kernel values are clipped away from 1 and division
+    denominators away from 0 to keep this stable in direct (non-log) space.
+
+    Forced-keep frames (``pinned_frames``, e.g. frame 0) remain in the pool
+    and keep contributing coverage, but are never eviction candidates.
+    """
+    memory_frame_indices = [int(idx) for idx in memory_frame_indices]
+    pinned_frames = {int(idx) for idx in (pinned_frames or [])}
+    if budget is None:
+        raise ValueError("mce requires an explicit memory budget")
+    if budget <= 0:
+        raise ValueError("mce budget must be positive")
+    if not memory_frame_indices:
+        return ({}, {}) if return_details else {}
+    if len(set(memory_frame_indices)) != len(memory_frame_indices):
+        raise ValueError("mce candidates must be unique")
+    if latent_features is None:
+        raise ValueError("mce requires content latent_features")
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("mce alpha must be in [0, 1]")
+
+    candidate_set = set(memory_frame_indices)
+    unknown_pinned = pinned_frames - candidate_set
+    if unknown_pinned:
+        raise ValueError(f"mce pinned frames are not candidates: {sorted(unknown_pinned)[:10]}")
+    if len(pinned_frames) > budget:
+        raise ValueError("mce has more pinned frames than its budget")
+
+    _feature_matrix(memory_frame_indices, latent_features)  # validates presence
+
+    num_candidates = len(memory_frame_indices)
+    selected_limit = min(int(budget), num_candidates)
+
+    # --- Query set: historical medoids only (Q = Q_hist, no future term) ---
+    query_frame_indices = _historical_query_medoids(memory_frame_indices, latent_features)
+    num_queries = len(query_frame_indices)
+
+    # --- Kernel: explicit convex combination, not a product -----------------
+    if alpha > 0.0:
+        geo_distance = pose_distances(c2ws, query_frame_indices, memory_frame_indices)
+        geo_kernel = np.exp(-geo_distance)
+    else:
+        geo_kernel = np.zeros((num_queries, num_candidates), dtype=np.float64)
+    vis_cosine = _feature_cosine_similarity_cross(
+        query_frame_indices, memory_frame_indices, latent_features
+    )
+    vis_kernel = np.clip((vis_cosine + 1.0) / 2.0, 0.0, 1.0)
+    kernel = np.clip(alpha * geo_kernel + (1.0 - alpha) * vis_kernel, 0.0, 1.0 - 1e-6)
+    weights = np.full(num_queries, 1.0 / max(num_queries, 1), dtype=np.float64)
+
+    # --- Algorithm 1: reverse deletion with cached running products --------
+    frame_to_col = {frame_idx: col for col, frame_idx in enumerate(memory_frame_indices)}
+    forced_cols = {frame_to_col[frame_idx] for frame_idx in pinned_frames}
+    remaining_cols = list(range(num_candidates))
+    one_minus_kernel = 1.0 - kernel
+    pool_product = np.prod(one_minus_kernel, axis=1)  # P_q over the full initial pool
+
+    removal_order = []
+    removal_marginals = {}
+    while len(remaining_cols) > selected_limit:
+        remaining = np.array(remaining_cols)
+        denom = np.maximum(one_minus_kernel[:, remaining], 1e-12)
+        marginals = np.sum(
+            (weights[:, None] * kernel[:, remaining] * pool_product[:, None]) / denom,
+            axis=0,
+        )
+        assert np.all(np.isfinite(marginals)), "mce marginals contain NaN/Inf"
+        eviction_candidates = [
+            (float(marginals[position]), col)
+            for position, col in enumerate(remaining_cols)
+            if col not in forced_cols
+        ]
+        if not eviction_candidates:
+            break
+        loss, evict_col = min(eviction_candidates, key=lambda item: item[0])
+        removal_order.append(evict_col)
+        removal_marginals[evict_col] = loss
+        pool_product = pool_product / np.maximum(one_minus_kernel[:, evict_col], 1e-12)
+        remaining_cols.remove(evict_col)
+
+    selected_cols = remaining_cols
+    selected_frame_set = {memory_frame_indices[col] for col in selected_cols}
+
+    # Final leave-one-out marginal for each survivor, w.r.t. the final set --
+    # this is the reported "value", not what drove the eviction decisions.
+    final_uncovered = (
+        np.prod(one_minus_kernel[:, selected_cols], axis=1)
+        if selected_cols
+        else np.ones(kernel.shape[0])
+    )
+    survivor_marginals = {}
+    for col in selected_cols:
+        denom = np.maximum(one_minus_kernel[:, col], 1e-12)
+        survivor_marginals[col] = float(np.sum(weights * kernel[:, col] * final_uncovered / denom))
+    coverage_value = float(np.sum(weights * (1.0 - final_uncovered)))
+
+    scores = {}
+    details = {}
+    for col, frame_idx in enumerate(memory_frame_indices):
+        selected = frame_idx in selected_frame_set
+        forced = frame_idx in pinned_frames
+        if forced:
+            score = float("inf")
+        elif selected:
+            score = 1.0 + survivor_marginals.get(col, 0.0)
+        else:
+            score = -1.0 - removal_marginals.get(col, 0.0)
+
+        scores[frame_idx] = float(score)
+        details[frame_idx] = {
+            "score": float(score),
+            "mce_selected": bool(selected),
+            "mce_forced_keep": bool(forced),
+            "mce_removal_rank": (
+                removal_order.index(col) if col in removal_order else None
+            ),
+            "mce_removal_marginal": removal_marginals.get(col),
+            "mce_survivor_marginal": survivor_marginals.get(col),
+            "mce_coverage_value": coverage_value,
+            "mce_alpha": float(alpha),
+            "mce_num_queries": num_queries,
+            "mce_query_frames": [int(f) for f in query_frame_indices],
         }
 
     return (scores, details) if return_details else scores

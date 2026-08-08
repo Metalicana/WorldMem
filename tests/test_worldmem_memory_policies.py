@@ -18,6 +18,15 @@ FrameMemoryBuffer = POLICIES.FrameMemoryBuffer
 compute_rarity_irreplaceability_scores = (
     POLICIES.compute_rarity_irreplaceability_scores
 )
+compute_marginal_coverage_eviction_scores = (
+    POLICIES.compute_marginal_coverage_eviction_scores
+)
+
+
+def make_line_c2ws(positions):
+    c2ws = np.repeat(np.eye(4, dtype=np.float64)[None], len(positions), axis=0)
+    c2ws[:, 0, 3] = np.array(positions, dtype=np.float64)
+    return c2ws
 
 
 class FrameMemoryBufferTest(unittest.TestCase):
@@ -100,6 +109,102 @@ class RarityIrreplaceabilityTest(unittest.TestCase):
         self.assertAlmostEqual(details[1]["irreplaceability"], 0.1)
         self.assertAlmostEqual(details[2]["irreplaceability"], 0.9)
         self.assertEqual(details[2]["irreplaceability_metric"], "mean_abs")
+
+
+class MarginalCoverageEvictionTest(unittest.TestCase):
+    def test_policy_requires_budget(self):
+        with self.assertRaises(ValueError):
+            FrameMemoryBuffer(policy="mce")
+
+    def test_duplicate_view_counterexample(self):
+        # frames 0, 1: near-identical room-A views (close pose, near-identical
+        # DINO features). frame 2: a distinct room-B view. Budget 2 should
+        # keep one room-A view plus the distinct one, not both room-A views.
+        c2ws = make_line_c2ws([0.0, 0.1, 20.0])
+        dino = {
+            0: np.array([1.0, 0.0]),
+            1: np.array([0.98, 0.02]),
+            2: np.array([0.0, 1.0]),
+        }
+
+        scores, details = compute_marginal_coverage_eviction_scores(
+            memory_frame_indices=[0, 1, 2],
+            c2ws=c2ws,
+            budget=2,
+            latent_features=dino,
+            return_details=True,
+        )
+
+        selected = {frame_idx for frame_idx, row in details.items() if row["mce_selected"]}
+        self.assertEqual(selected, {0, 2})
+        self.assertLess(scores[1], scores[0])
+        self.assertLess(scores[1], scores[2])
+
+        buffer = FrameMemoryBuffer(policy="mce", budget=2)
+        evicted = buffer.update([0, 1, 2], eviction_scores=scores)
+        self.assertEqual(buffer.candidates(), [0, 2])
+        self.assertEqual(evicted, [1])
+
+    def test_kernel_is_additive_not_multiplicative(self):
+        # Identical pose, orthogonal DINO features. Under the additive kernel
+        # alpha * K_geo + (1 - alpha) * K_vis, K_geo = 1 keeps K(q, m) well
+        # above zero even though K_vis = 0 -- a product kernel would collapse
+        # it to ~0 instead.
+        c2ws = make_line_c2ws([0.0, 0.0])
+        dino = {
+            0: np.array([1.0, 0.0]),
+            1: np.array([0.0, 1.0]),
+        }
+
+        _, details = compute_marginal_coverage_eviction_scores(
+            memory_frame_indices=[0, 1],
+            c2ws=c2ws,
+            budget=2,
+            latent_features=dino,
+            alpha=0.65,
+            return_details=True,
+        )
+        # K(0, 1) = 0.65 * K_geo(1) + 0.35 * K_vis(0.5) = 0.825.
+        self.assertGreater(details[0]["mce_coverage_value"], 0.7)
+
+    def test_forced_frames_are_never_evicted(self):
+        c2ws = make_line_c2ws([0.0, 0.05, 20.0])
+        dino = {
+            0: np.array([1.0, 0.0]),
+            1: np.array([1.0, 0.0]),
+            2: np.array([0.0, 1.0]),
+        }
+
+        _, details = compute_marginal_coverage_eviction_scores(
+            memory_frame_indices=[0, 1, 2],
+            c2ws=c2ws,
+            budget=1,
+            pinned_frames={1},
+            latent_features=dino,
+            return_details=True,
+        )
+        self.assertTrue(details[1]["mce_selected"])
+        self.assertTrue(details[1]["mce_forced_keep"])
+        self.assertEqual(details[1]["score"], float("inf"))
+
+    def test_alpha_zero_drops_geometry_entirely(self):
+        # Far-apart poses but identical content: with alpha=0 the geometry
+        # cue must not matter at all.
+        c2ws = make_line_c2ws([0.0, 1000.0])
+        dino = {
+            0: np.array([1.0, 0.0]),
+            1: np.array([1.0, 0.0]),
+        }
+
+        _, details = compute_marginal_coverage_eviction_scores(
+            memory_frame_indices=[0, 1],
+            c2ws=c2ws,
+            budget=2,
+            latent_features=dino,
+            alpha=0.0,
+            return_details=True,
+        )
+        self.assertAlmostEqual(details[0]["mce_coverage_value"], 1.0, places=5)
 
 
 if __name__ == "__main__":

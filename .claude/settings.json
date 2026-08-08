@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m unittest tests.test_worldmem_memory_policies -v)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('algorithms/worldmem/df_video.py'\\).read\\(\\)\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('algorithms/worldmem/memory_policies.py'\\).read\\(\\)\\)\")",
+      "Bash(bash -n /Users/metalicana/projects_summer_2026/WorldMem/scripts/run_worldmem_memory_policy_smoke.sh)",
+      "Bash(git checkout *)",
+      "Bash(python -m unittest discover -s tests -v)",
+      "Bash(bash -n scripts/run_worldmem_memory_policy_smoke.sh)",
+      "Bash(python -m unittest discover -s tests -q)",
+      "Bash(nvidia-smi)",
+      "Bash(python3 -c \"import torch; print\\(torch.cuda.is_available\\(\\)\\)\")",
+      "Bash(bash -n /Users/metalicana/projects_summer_2026/WorldMem/scripts/audit_worldmem_memory_policy_runs.sh)",
+      "Bash(chmod +x /Users/metalicana/projects_summer_2026/WorldMem/scripts/audit_worldmem_memory_policy_runs.sh)",
+      "Bash(bash -c ' *)"
+    ]
+  }
+}

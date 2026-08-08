@@ -27,6 +27,7 @@ from .memory_policies import (
     BUDGETED_MEMORY_POLICIES,
     FrameMemoryBuffer,
     compute_kcenter_coreset_scores,
+    compute_marginal_coverage_eviction_scores,
     pairwise_mean_abs_distances,
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
@@ -379,7 +380,15 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.profile_timing = getattr(cfg, "profile_timing", self.profile_cuda_memory)
         self.memory_bank_device = getattr(cfg, "memory_bank_device", "cpu")
         self.memory_reference_source = getattr(cfg, "memory_reference_source", "predicted")
-        self.memory_feature_backend = getattr(cfg, "memory_feature_backend", "latent")
+        # MCE's kernel and Q_hist clustering both assume a semantically meaningful
+        # content embedding (the brief specifies DINO cosine similarity). Pooled VAE
+        # latents ("latent", the general default) are a much weaker proxy for that.
+        # Only the *implicit* default changes here -- an explicit
+        # `memory_feature_backend=...` override always wins regardless of policy.
+        _default_feature_backend = "dino" if self.memory_policy == "mce" else "latent"
+        self.memory_feature_backend = getattr(
+            cfg, "memory_feature_backend", _default_feature_backend
+        )
         self.memory_feature_device = getattr(cfg, "memory_feature_device", "auto")
         self.memory_dino_model_name = getattr(
             cfg,
@@ -419,6 +428,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.kcenter_visual_weight = float(getattr(cfg, "kcenter_visual_weight", 0.5))
         self.kcenter_pose_weight = float(getattr(cfg, "kcenter_pose_weight", 0.5))
         self.kcenter_time_weight = float(getattr(cfg, "kcenter_time_weight", 0.0))
+        self.mce_alpha = float(getattr(cfg, "mce_alpha", 0.65))
+        if not 0.0 <= self.mce_alpha <= 1.0:
+            raise ValueError("mce_alpha must be in [0, 1]")
         if self.memory_bank_device not in {"cpu", "gpu"}:
             raise ValueError("memory_bank_device must be either 'cpu' or 'gpu'")
         if self.memory_reference_source not in {"predicted", "ground_truth"}:
@@ -852,6 +864,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "rarity_irreplaceability",
             "slam_covisibility",
             "kcenter_coreset",
+            "mce",
         }:
             return {0}
         return set()
@@ -1171,6 +1184,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "eviction_kcenter_visual_weight": detail.get("kcenter_visual_weight"),
             "eviction_kcenter_pose_weight": detail.get("kcenter_pose_weight"),
             "eviction_kcenter_time_weight": detail.get("kcenter_time_weight"),
+            "eviction_mce_selected": detail.get("mce_selected"),
+            "eviction_mce_forced_keep": detail.get("mce_forced_keep"),
+            "eviction_mce_removal_rank": detail.get("mce_removal_rank"),
+            "eviction_mce_removal_marginal": detail.get("mce_removal_marginal"),
+            "eviction_mce_survivor_marginal": detail.get("mce_survivor_marginal"),
+            "eviction_mce_coverage_value": detail.get("mce_coverage_value"),
+            "eviction_mce_alpha": detail.get("mce_alpha"),
+            "eviction_mce_num_queries": detail.get("mce_num_queries"),
         }
 
     def _compute_memory_scores(self, frame_indices, c2w_mat, xs_pred, batch_index, archive_frame_indices=None):
@@ -1228,6 +1249,18 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 visual_weight=self.kcenter_visual_weight,
                 pose_weight=self.kcenter_pose_weight,
                 time_weight=self.kcenter_time_weight,
+                return_details=True,
+            )
+
+        if self.memory_policy == "mce":
+            c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
+            return compute_marginal_coverage_eviction_scores(
+                memory_frame_indices=frame_indices,
+                c2ws=c2ws,
+                budget=self.memory_budget,
+                pinned_frames=pinned_frames,
+                latent_features=primary_features,
+                alpha=self.mce_alpha,
                 return_details=True,
             )
 

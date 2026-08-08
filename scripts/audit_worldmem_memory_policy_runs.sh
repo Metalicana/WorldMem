@@ -12,10 +12,16 @@
 #
 # Usage:
 #   bash scripts/audit_worldmem_memory_policy_runs.sh [ROOT]
+#   AUDIT_FILTER='_n30$|_n15$' bash scripts/audit_worldmem_memory_policy_runs.sh
 #
 # ROOT defaults to the same STORAGE_ROOT/outputs/memory_policy the smoke
 # script writes to (CECSL /data/ab575577/worldmem, else $HOME/worldmem_results,
 # both overridable with WORLDMEM_STORAGE_ROOT).
+#
+# AUDIT_FILTER, if set, is an extended regex (grep -E) applied to each run
+# directory's basename -- only matching runs are listed. Use it to cut through
+# one-off smoke/debug directories (e.g. *_smoke, stray *_n1.._n14 probes) that
+# sit alongside the real sweep cells in the same output tree.
 
 set -euo pipefail
 
@@ -88,6 +94,9 @@ total_done=0
 for run_dir in "$ROOT"/*/; do
   [ -d "$run_dir" ] || continue
   run_name="$(basename "$run_dir")"
+  if [ -n "${AUDIT_FILTER:-}" ] && ! echo "$run_name" | grep -qE "$AUDIT_FILTER"; then
+    continue
+  fi
   IFS='|' read -r policy budget duration requested <<< "$(parse_run_name "$run_name")"
   done_count="$(count_completed_batches "$run_dir/videos/test_vis/pred")"
   if [ -n "$requested" ]; then

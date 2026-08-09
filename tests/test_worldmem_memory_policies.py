@@ -187,6 +187,38 @@ class MarginalCoverageEvictionTest(unittest.TestCase):
         self.assertTrue(details[1]["mce_forced_keep"])
         self.assertEqual(details[1]["score"], float("inf"))
 
+    def test_large_initial_context_trimmed_to_small_budget_stays_finite(self):
+        # Regression test for a real production crash: WorldMem's initial
+        # context can hand MCE ~600 candidates to trim down to a budget as
+        # small as 16 -- hundreds of reverse-deletion steps, not the "dozens"
+        # the direct-space running-product assumed safe. A long enough run of
+        # divisions by kernel values near the 1e-6 clip floor compounded the
+        # running product past float64's max and tripped the finite-marginals
+        # assertion. Autocorrelated positions/features (a slow-moving camera,
+        # a random walk in feature space) reproduce the redundant-content
+        # shape that triggered it -- independent random features did not.
+        n = 600
+        rng = np.random.default_rng(0)
+        c2ws = np.repeat(np.eye(4, dtype=np.float64)[None], n, axis=0)
+        c2ws[:, :3, 3] = rng.normal(scale=0.05, size=(n, 3)).cumsum(axis=0)
+        feature_walk = rng.normal(scale=0.05, size=(n, 32)).cumsum(axis=0)
+        dino = {i: feature_walk[i] for i in range(n)}
+
+        for budget in (16, 32, 64, 128):
+            scores, details = compute_marginal_coverage_eviction_scores(
+                memory_frame_indices=list(range(n)),
+                c2ws=c2ws,
+                budget=budget,
+                pinned_frames={0},
+                latent_features=dino,
+                alpha=0.65,
+                return_details=True,
+            )
+            selected = [frame_idx for frame_idx, row in details.items() if row["mce_selected"]]
+            self.assertEqual(len(selected), budget)
+            for score in scores.values():
+                self.assertTrue(np.isfinite(score) or score == float("inf"))
+
     def test_alpha_zero_drops_geometry_entirely(self):
         # Far-apart poses but identical content: with alpha=0 the geometry
         # cue must not matter at all.

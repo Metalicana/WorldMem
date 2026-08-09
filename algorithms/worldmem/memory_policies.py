@@ -708,10 +708,16 @@ def compute_marginal_coverage_eviction_scores(
     established for this setting.
 
     Efficiency: the running product P_q = prod_{m in P} (1 - K(q, m)) is
-    cached once per pool and updated by division on each eviction rather than
-    recomputed from scratch, giving O(budget * |Q|) total work instead of
-    O(budget^2 * |Q|). Kernel values are clipped away from 1 and division
-    denominators away from 0 to keep this stable in direct (non-log) space.
+    cached once per pool and updated on each eviction rather than recomputed
+    from scratch, giving O(budget * |Q|) total work instead of O(budget^2 *
+    |Q|). It is tracked as a sum of logs, not a direct-space product: removing
+    an item divides P_q by (1 - K(q, removed)), and with hundreds of
+    candidates trimmed down to a small budget (WorldMem's initial-context
+    pool can be ~600 frames wide), that is hundreds of divisions by values as
+    small as the 1e-6 kernel-clip floor. Direct-space accumulation only stays
+    below "dozens" of candidates before repeated division-by-near-zero
+    compounds P_q past float64's max and overflows to inf; log-space turns
+    that same update into subtraction of bounded values, which cannot.
 
     Forced-keep frames (``pinned_frames``, e.g. frame 0) remain in the pool
     and keep contributing coverage, but are never eviction candidates.
@@ -760,20 +766,27 @@ def compute_marginal_coverage_eviction_scores(
     kernel = np.clip(alpha * geo_kernel + (1.0 - alpha) * vis_kernel, 0.0, 1.0 - 1e-6)
     weights = np.full(num_queries, 1.0 / max(num_queries, 1), dtype=np.float64)
 
-    # --- Algorithm 1: reverse deletion with cached running products --------
+    # --- Algorithm 1: reverse deletion with a log-space running product ----
+    # log(1 - K) is finite everywhere: kernel is clipped to <= 1 - 1e-6, so
+    # one_minus_kernel is bounded away from 0 and this never hits log(0).
     frame_to_col = {frame_idx: col for col, frame_idx in enumerate(memory_frame_indices)}
     forced_cols = {frame_to_col[frame_idx] for frame_idx in pinned_frames}
     remaining_cols = list(range(num_candidates))
     one_minus_kernel = 1.0 - kernel
-    pool_product = np.prod(one_minus_kernel, axis=1)  # P_q over the full initial pool
+    log_one_minus_kernel = np.log(one_minus_kernel)
+    log_pool_product = np.sum(log_one_minus_kernel, axis=1)  # log P_q over the full initial pool
 
     removal_order = []
     removal_marginals = {}
     while len(remaining_cols) > selected_limit:
         remaining = np.array(remaining_cols)
-        denom = np.maximum(one_minus_kernel[:, remaining], 1e-12)
+        # exp(log_pool_product - log(1 - K(q, i))) == P_q over pool \ {i}, computed
+        # by subtraction (bounded) instead of dividing by a near-zero denominator.
+        pool_product_excluding = np.exp(
+            log_pool_product[:, None] - log_one_minus_kernel[:, remaining]
+        )
         marginals = np.sum(
-            (weights[:, None] * kernel[:, remaining] * pool_product[:, None]) / denom,
+            weights[:, None] * kernel[:, remaining] * pool_product_excluding,
             axis=0,
         )
         assert np.all(np.isfinite(marginals)), "mce marginals contain NaN/Inf"
@@ -787,7 +800,7 @@ def compute_marginal_coverage_eviction_scores(
         loss, evict_col = min(eviction_candidates, key=lambda item: item[0])
         removal_order.append(evict_col)
         removal_marginals[evict_col] = loss
-        pool_product = pool_product / np.maximum(one_minus_kernel[:, evict_col], 1e-12)
+        log_pool_product = log_pool_product - log_one_minus_kernel[:, evict_col]
         remaining_cols.remove(evict_col)
 
     selected_cols = remaining_cols

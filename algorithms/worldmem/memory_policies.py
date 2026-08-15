@@ -225,11 +225,39 @@ def connected_components_from_threshold(pairwise_distances, threshold):
     return cluster_ids, clusters
 
 
-def estimate_cluster_threshold(pairwise_distances):
+def estimate_cluster_threshold(pairwise_distances, rarity_neighbors=3):
+    """Median distance to each point's rarity_neighbors-th nearest neighbor.
+
+    BUG HISTORY: this always used the 1st-nearest-neighbor distance
+    (``np.partition(..., 0)[:, 0]``) with no way to ask for anything else --
+    both ``compute_rarity_irreplaceability_scores`` (RI) and
+    ``_historical_query_medoids`` (MCE's Q_hist) inherited that fixed k=1
+    granularity. Ported from the same fix landed in MemCam's
+    ``memory_policies.py`` after an MCE offline sweep there found clustering
+    was insensitive to the (there, dead) ``rarity_neighbors`` parameter and a
+    synthetic test showed 6 well-separated 10-item clusters still fragmenting
+    into 37 near-singleton clusters regardless of the requested k.
+    ``rarity_neighbors=1`` reproduces the old behavior exactly, so this is a
+    strict generalization, not a change at any call site that never asked
+    for anything else.
+    """
     finite = pairwise_distances[np.isfinite(pairwise_distances)]
     if finite.size == 0:
         return 0.0
-    nearest = np.partition(pairwise_distances, 0, axis=1)[:, 0]
+
+    # Use the median k-th-nearest-neighbor distance as the mode scale. Larger
+    # k coarsens the threshold (merges more into one cluster); k=1 matches the
+    # original single-nearest-neighbor behavior. Each row has exactly one
+    # guaranteed-inf self-distance entry (diagonal), which sorts to the last
+    # position after partitioning -- so the valid non-self neighbor range is
+    # num_points - 2, not num_points - 1. Getting this off-by-one wrong lets
+    # the index land on the self-inf entry for small candidate pools (this is
+    # exactly what broke MemCam's own duplicate-view counterexample test at 3
+    # candidates before they caught it -- ported here so WorldMem doesn't hit
+    # the same edge case independently).
+    num_points = pairwise_distances.shape[0]
+    neighbor_index = max(0, min(int(rarity_neighbors) - 1, num_points - 2))
+    nearest = np.partition(pairwise_distances, neighbor_index, axis=1)[:, neighbor_index]
     nearest = nearest[np.isfinite(nearest)]
     if nearest.size:
         return float(np.median(nearest))
@@ -251,6 +279,7 @@ def compute_rarity_irreplaceability_scores(
     rarity_features=None,
     irreplaceability_features=None,
     irreplaceability_metric="cosine",
+    rarity_neighbors=3,
 ):
     memory_frame_indices = list(memory_frame_indices)
     pinned_frames = set(pinned_frames or [])
@@ -277,7 +306,7 @@ def compute_rarity_irreplaceability_scores(
         nearest_distances = np.ones(1, dtype=np.float64)
         nearest_indices = np.full(1, -1, dtype=np.int64)
     else:
-        threshold = estimate_cluster_threshold(rarity_pairwise)
+        threshold = estimate_cluster_threshold(rarity_pairwise, rarity_neighbors)
         cluster_pairwise = rarity_pairwise.copy()
         np.fill_diagonal(cluster_pairwise, 0.0)
         cluster_ids, clusters = connected_components_from_threshold(
@@ -319,6 +348,7 @@ def compute_rarity_irreplaceability_scores(
             "cluster_id": int(cluster_ids[index]),
             "cluster_size": int(cluster_sizes[index]),
             "cluster_threshold": float(threshold),
+            "cluster_rarity_neighbors": int(rarity_neighbors),
             "nearest_frame": (
                 None
                 if nearest_indices[index] < 0
@@ -608,7 +638,7 @@ def compute_kcenter_coreset_scores(
     return (scores, details) if return_details else scores
 
 
-def _historical_query_medoids(memory_frame_indices, latent_features):
+def _historical_query_medoids(memory_frame_indices, latent_features, rarity_neighbors=3):
     """Cluster candidates by content-feature similarity and return one medoid per cluster.
 
     Reuses the same clustering primitives as ``compute_rarity_irreplaceability_scores``
@@ -616,6 +646,20 @@ def _historical_query_medoids(memory_frame_indices, latent_features):
     contributes exactly one query point regardless of its size -- a region visited
     many times must not outweigh a rare region in the coverage objective (that is
     what lets MCE beat a "concentrate on frequently-reused anchors" heuristic).
+
+    ``rarity_neighbors`` controls how coarse that clustering is (see
+    ``estimate_cluster_threshold``): k=1 is the tightest possible threshold and
+    was, until this parameter existed, the only granularity MCE's Q_hist could
+    ever use here. Real access-trace data from a WorldMem budget sweep showed
+    the number of distinct medoids sitting well below budget at every level
+    (e.g. a median of ~11 medoids at budget=16 up to ~78 at budget=128) --
+    every candidate beyond its cluster's medoid gets a near-zero, barely
+    distinguishable marginal (see the coverage objective's docstring), so a
+    persistently low k=1 threshold means most of the retained budget is
+    filled by an effectively arbitrary tiebreak among redundant candidates.
+    Larger k coarsens clustering and shrinks that gap, at the cost of treating
+    more distinct content as "the same query" -- the right value is a real
+    open question, not assumed here.
     """
     memory_frame_indices = list(memory_frame_indices)
     if len(memory_frame_indices) == 1:
@@ -624,7 +668,7 @@ def _historical_query_medoids(memory_frame_indices, latent_features):
     feature_matrix = _feature_matrix(memory_frame_indices, latent_features)
     pairwise = cosine_distances(feature_matrix)
     np.fill_diagonal(pairwise, np.inf)
-    threshold = estimate_cluster_threshold(pairwise)
+    threshold = estimate_cluster_threshold(pairwise, rarity_neighbors)
 
     cluster_pairwise = pairwise.copy()
     np.fill_diagonal(cluster_pairwise, 0.0)
@@ -649,6 +693,7 @@ def compute_marginal_coverage_eviction_scores(
     pinned_frames=None,
     latent_features=None,
     alpha=0.65,
+    rarity_neighbors=3,
     return_details=False,
 ):
     """Marginal Coverage Eviction (MCE): write-path noisy-OR set-coverage eviction.
@@ -750,7 +795,9 @@ def compute_marginal_coverage_eviction_scores(
     selected_limit = min(int(budget), num_candidates)
 
     # --- Query set: historical medoids only (Q = Q_hist, no future term) ---
-    query_frame_indices = _historical_query_medoids(memory_frame_indices, latent_features)
+    query_frame_indices = _historical_query_medoids(
+        memory_frame_indices, latent_features, rarity_neighbors
+    )
     num_queries = len(query_frame_indices)
 
     # --- Kernel: explicit convex combination, not a product -----------------
@@ -843,6 +890,7 @@ def compute_marginal_coverage_eviction_scores(
             "mce_survivor_marginal": survivor_marginals.get(col),
             "mce_coverage_value": coverage_value,
             "mce_alpha": float(alpha),
+            "mce_rarity_neighbors": int(rarity_neighbors),
             "mce_num_queries": num_queries,
             "mce_query_frames": [int(f) for f in query_frame_indices],
         }

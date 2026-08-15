@@ -21,6 +21,9 @@ compute_rarity_irreplaceability_scores = (
 compute_marginal_coverage_eviction_scores = (
     POLICIES.compute_marginal_coverage_eviction_scores
 )
+estimate_cluster_threshold = POLICIES.estimate_cluster_threshold
+connected_components_from_threshold = POLICIES.connected_components_from_threshold
+cosine_distances = POLICIES.cosine_distances
 
 
 def make_line_c2ws(positions):
@@ -111,6 +114,66 @@ class RarityIrreplaceabilityTest(unittest.TestCase):
         self.assertEqual(details[2]["irreplaceability_metric"], "mean_abs")
 
 
+class EstimateClusterThresholdTest(unittest.TestCase):
+    # Regression coverage for a bug reported by the MemCam session working on
+    # the same method: estimate_cluster_threshold had no way to ask for
+    # anything but the 1st-nearest-neighbor distance, so rarity_neighbors was
+    # dead code everywhere it existed (and in this port, didn't exist as a
+    # parameter at all -- the behavior was hardcoded the same way). Both RI's
+    # clustering and MCE's Q_hist medoid clustering inherited that fixed k=1
+    # granularity as a result.
+
+    def _six_cluster_features(self):
+        rng = np.random.default_rng(0)
+        # 6 well-separated clusters of 10 near-identical points each.
+        centers = rng.normal(scale=10.0, size=(6, 8))
+        points = np.concatenate(
+            [center + rng.normal(scale=0.05, size=(10, 8)) for center in centers]
+        )
+        return points
+
+    def test_rarity_neighbors_one_reproduces_old_hardcoded_behavior(self):
+        rng = np.random.default_rng(1)
+        distances = cosine_distances(rng.normal(size=(15, 6)))
+        np.fill_diagonal(distances, np.inf)
+        old_behavior = float(np.median(np.partition(distances, 0, axis=1)[:, 0]))
+        self.assertAlmostEqual(
+            estimate_cluster_threshold(distances, rarity_neighbors=1), old_behavior
+        )
+
+    def test_larger_rarity_neighbors_coarsens_clustering(self):
+        points = self._six_cluster_features()
+        distances = cosine_distances(points)
+        np.fill_diagonal(distances, np.inf)
+        cluster_distances = distances.copy()
+        np.fill_diagonal(cluster_distances, 0.0)
+
+        cluster_counts = {}
+        for k in (1, 8, 25):
+            threshold = estimate_cluster_threshold(distances, rarity_neighbors=k)
+            _, clusters = connected_components_from_threshold(cluster_distances, threshold)
+            cluster_counts[k] = len(clusters)
+
+        # A small k should badly over-fragment a genuinely 6-cluster dataset;
+        # a large-enough k should coarsen it, at minimum strictly fewer
+        # clusters than k=1 and closer to the true structure.
+        self.assertGreater(cluster_counts[1], 6)
+        self.assertLess(cluster_counts[8], cluster_counts[1])
+
+    def test_small_pool_stays_finite_across_neighbor_values(self):
+        # The off-by-one edge case flagged alongside the fix: each row has
+        # exactly one guaranteed-inf self-distance entry (the diagonal),
+        # which sorts to the last position after partitioning, so the valid
+        # non-self neighbor range is num_points - 2, not num_points - 1.
+        for num_points in (1, 2, 3, 4):
+            rng = np.random.default_rng(num_points)
+            distances = cosine_distances(rng.normal(size=(num_points, 4)))
+            np.fill_diagonal(distances, np.inf)
+            for k in (1, 2, 3, 10):
+                threshold = estimate_cluster_threshold(distances, rarity_neighbors=k)
+                self.assertTrue(np.isfinite(threshold))
+
+
 class MarginalCoverageEvictionTest(unittest.TestCase):
     def test_policy_requires_budget(self):
         with self.assertRaises(ValueError):
@@ -120,6 +183,14 @@ class MarginalCoverageEvictionTest(unittest.TestCase):
         # frames 0, 1: near-identical room-A views (close pose, near-identical
         # DINO features). frame 2: a distinct room-B view. Budget 2 should
         # keep one room-A view plus the distinct one, not both room-A views.
+        #
+        # rarity_neighbors=1 pinned deliberately: this test validates reverse
+        # deletion given a known {0,1}/{2} clustering, not clustering-parameter
+        # sensitivity. At only 3 candidates there are just 2 possible "other"
+        # neighbors per point, so rarity_neighbors>=2 saturates the k-th
+        # nearest-neighbor threshold to the single largest pairwise distance in
+        # the pool and merges all 3 into one cluster -- correct k-NN behavior,
+        # but it would silently change what this test is actually exercising.
         c2ws = make_line_c2ws([0.0, 0.1, 20.0])
         dino = {
             0: np.array([1.0, 0.0]),
@@ -132,6 +203,7 @@ class MarginalCoverageEvictionTest(unittest.TestCase):
             c2ws=c2ws,
             budget=2,
             latent_features=dino,
+            rarity_neighbors=1,
             return_details=True,
         )
 

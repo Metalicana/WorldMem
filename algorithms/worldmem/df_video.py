@@ -431,6 +431,21 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.mce_alpha = float(getattr(cfg, "mce_alpha", 0.65))
         if not 0.0 <= self.mce_alpha <= 1.0:
             raise ValueError("mce_alpha must be in [0, 1]")
+        # Controls Q_hist clustering coarseness (estimate_cluster_threshold's
+        # k-th-nearest-neighbor distance). Ported from a fix landed in MemCam's
+        # port of this same shared clustering code: rarity_neighbors used to be
+        # dead-code-equivalent everywhere (always k=1, the tightest possible
+        # threshold). Default of 3 matches MemCam's default after the fix, not
+        # a WorldMem-specific tuning result.
+        self.mce_rarity_neighbors = int(getattr(cfg, "mce_rarity_neighbors", 3))
+        if self.mce_rarity_neighbors < 1:
+            raise ValueError("mce_rarity_neighbors must be >= 1")
+        # Same clustering knob, for RI's own real call site -- previously this
+        # was silently unconfigurable (always the function's own default),
+        # which was in tension with treating "the right value" as open.
+        self.ri_rarity_neighbors = int(getattr(cfg, "ri_rarity_neighbors", 3))
+        if self.ri_rarity_neighbors < 1:
+            raise ValueError("ri_rarity_neighbors must be >= 1")
         if self.memory_bank_device not in {"cpu", "gpu"}:
             raise ValueError("memory_bank_device must be either 'cpu' or 'gpu'")
         if self.memory_reference_source not in {"predicted", "ground_truth"}:
@@ -1163,6 +1178,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "eviction_cluster_id": detail.get("cluster_id"),
             "eviction_cluster_size": detail.get("cluster_size"),
             "eviction_cluster_threshold": detail.get("cluster_threshold"),
+            "eviction_cluster_rarity_neighbors": detail.get("cluster_rarity_neighbors"),
             "eviction_nearest_frame": detail.get("nearest_frame"),
             "eviction_nearest_distance": detail.get("nearest_distance"),
             "eviction_redundancy_ratio": detail.get("redundancy_ratio"),
@@ -1191,6 +1207,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "eviction_mce_survivor_marginal": detail.get("mce_survivor_marginal"),
             "eviction_mce_coverage_value": detail.get("mce_coverage_value"),
             "eviction_mce_alpha": detail.get("mce_alpha"),
+            "eviction_mce_rarity_neighbors": detail.get("mce_rarity_neighbors"),
             "eviction_mce_num_queries": detail.get("mce_num_queries"),
         }
 
@@ -1224,6 +1241,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 irreplaceability_features=rgb_features,
                 irreplaceability_metric=irreplaceability_metric,
                 pinned_frames=pinned_frames,
+                rarity_neighbors=self.ri_rarity_neighbors,
                 return_details=True,
             )
 
@@ -1261,6 +1279,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 pinned_frames=pinned_frames,
                 latent_features=primary_features,
                 alpha=self.mce_alpha,
+                rarity_neighbors=self.mce_rarity_neighbors,
                 return_details=True,
             )
 

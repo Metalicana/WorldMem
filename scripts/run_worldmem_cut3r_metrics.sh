@@ -13,7 +13,18 @@ fi
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-$STORAGE_ROOT/outputs/memory_policy}"
 DATA_DIR="${WORLDMEM_DATA_DIR:-data/minecraft}"
-RUNS="${RUNS:-worldmem_unbounded_60s_n30,worldmem_fifo_b32_60s_n30,worldmem_fifo_b64_60s_n30,worldmem_rarity_irreplaceability_b32_60s_n30,worldmem_rarity_irreplaceability_b64_60s_n30,worldmem_slam_covisibility_b32_60s_n30,worldmem_slam_covisibility_b64_60s_n30}"
+# Widened to the full 21-cell sweep (was a partial b32/b64-only, no
+# kcenter_coreset/mce default) so this matches the same comparison set as
+# evaluate_worldmem_lpips.sh's unified LIMIT=15 pass and the new
+# run_worldmem_vbench.sh default. CUT3R reconstruction is per-video expensive
+# (a full pose-estimation pass, not a cheap metric) -- narrow RUNS to a few
+# cells first if you just want a quick read before committing to all 21.
+RUNS="${RUNS:-worldmem_unbounded_60s_n30,\
+worldmem_fifo_b16_60s_n30,worldmem_fifo_b32_60s_n30,worldmem_fifo_b64_60s_n30,worldmem_fifo_b128_60s_n30,\
+worldmem_rarity_irreplaceability_b16_60s_n30,worldmem_rarity_irreplaceability_b32_60s_n30,worldmem_rarity_irreplaceability_b64_60s_n30,worldmem_rarity_irreplaceability_b128_60s_n30,\
+worldmem_slam_covisibility_b16_60s_n30,worldmem_slam_covisibility_b32_60s_n30,worldmem_slam_covisibility_b64_60s_n30,worldmem_slam_covisibility_b128_60s_n30,\
+worldmem_kcenter_coreset_b16_60s_n15,worldmem_kcenter_coreset_b32_60s_n15,worldmem_kcenter_coreset_b64_60s_n15,worldmem_kcenter_coreset_b128_60s_n15,\
+worldmem_mce_b16_60s_n15,worldmem_mce_b32_60s_n15,worldmem_mce_b64_60s_n15,worldmem_mce_b128_60s_n15}"
 CUT3R_ROOT="${CUT3R_ROOT:-$HOME/MemCam/CUT3R}"
 CUT3R_MODEL="${CUT3R_MODEL:-$CUT3R_ROOT/src/cut3r_512_dpt_4_64.pth}"
 CUT3R_SIZE="${CUT3R_SIZE:-512}"

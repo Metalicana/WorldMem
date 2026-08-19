@@ -45,6 +45,18 @@ KCENTER_TIME_WEIGHT="${KCENTER_TIME_WEIGHT:-0.0}"
 MCE_ALPHA="${MCE_ALPHA:-0.65}"
 MCE_RARITY_NEIGHBORS="${MCE_RARITY_NEIGHBORS:-3}"
 RI_RARITY_NEIGHBORS="${RI_RARITY_NEIGHBORS:-3}"
+# Retrieval's own FOV-overlap test, applies regardless of memory_policy --
+# defaults reproduce the old hardcoded values exactly, only matters if set.
+RETRIEVAL_FOV_RADIUS="${RETRIEVAL_FOV_RADIUS:-30}"
+RETRIEVAL_FOV_SAMPLES="${RETRIEVAL_FOV_SAMPLES:-10000}"
+RETRIEVAL_FOV_HALF_H="${RETRIEVAL_FOV_HALF_H:-52.5}"
+RETRIEVAL_FOV_HALF_V="${RETRIEVAL_FOV_HALF_V:-37.5}"
+# Diagnostic: is the retrieval winner stable across independent resamples at
+# increasing precision, or is it noise picking among near-tied candidates?
+# Off by default, real added cost per step when on -- see run docs before
+# using this on anything but a short targeted probe.
+TRACE_OVERLAP_PRECISION_CHECK="${TRACE_OVERLAP_PRECISION_CHECK:-false}"
+OVERLAP_PRECISION_MULTIPLIERS="${OVERLAP_PRECISION_MULTIPLIERS:-1,10,50}"
 LIMIT_BATCH="${LIMIT_BATCH:-${NUM_VIDEOS:-1}}"
 REQUESTED_LIMIT_BATCH="$LIMIT_BATCH"
 FPS="${FPS:-10}"
@@ -225,6 +237,12 @@ cmd=(
   +algorithm.mce_alpha="$MCE_ALPHA"
   +algorithm.mce_rarity_neighbors="$MCE_RARITY_NEIGHBORS"
   +algorithm.ri_rarity_neighbors="$RI_RARITY_NEIGHBORS"
+  +algorithm.retrieval_fov_radius="$RETRIEVAL_FOV_RADIUS"
+  +algorithm.retrieval_fov_samples="$RETRIEVAL_FOV_SAMPLES"
+  +algorithm.retrieval_fov_half_h="$RETRIEVAL_FOV_HALF_H"
+  +algorithm.retrieval_fov_half_v="$RETRIEVAL_FOV_HALF_V"
+  +algorithm.trace_overlap_precision_check="$TRACE_OVERLAP_PRECISION_CHECK"
+  +algorithm.overlap_precision_multipliers="$OVERLAP_PRECISION_MULTIPLIERS"
   +algorithm.access_trace_path="$TRACE_PATH"
   +output_dir="$OUTPUT_DIR"
 )

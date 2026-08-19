@@ -168,6 +168,53 @@ def generate_points_in_sphere(n_points, radius):
     points = torch.stack((x, y, z), dim=1)
     return points
 
+def resample_overlap_winners(
+    pose_conditions, curr_frame, horizon, candidate_tensor, candidate_mask,
+    frame_idx, fov_half_h, fov_half_v, num_samples, radius,
+):
+    """Redo the overlap-based winner pick with a fresh independent point draw.
+
+    Diagnostic only (gated by trace_overlap_precision_check, off by default,
+    zero cost otherwise): checks whether the retrieval winner in
+    _generate_condition_indices is a stable pick or a noisy one, by rerunning
+    the exact same Monte-Carlo FOV-overlap test with a fresh, independently
+    sampled point cloud at a chosen sample count. Mirrors the real selection
+    logic (same confidence formula: overlap ratio plus the same mild recency
+    term) exactly, so a different winner here means the original pick could
+    just as easily have gone the other way -- not that this resample is more
+    "correct" on its own, but comparing several sample counts against each
+    other tells us whether the winner is converging to something stable as
+    precision increases, or still flipping even at high precision.
+    """
+    points = generate_points_in_sphere(num_samples, radius).to(pose_conditions.device)
+    batch_size = pose_conditions.shape[1]
+    points = points[:, None].repeat(1, batch_size, 1)
+    points = points + pose_conditions[curr_frame, :, :3][None]
+
+    in_fov1 = torch.stack([
+        is_inside_fov_3d_hv(points, pc[:, :3], pc[:, -2], pc[:, -1], fov_half_h, fov_half_v)
+        for pc in pose_conditions[curr_frame:curr_frame + horizon]
+    ])
+    in_fov1 = torch.sum(in_fov1, 0) > 0
+
+    in_fov_list = torch.stack([
+        is_inside_fov_3d_hv(points, pc[:, :3], pc[:, -2], pc[:, -1], fov_half_h, fov_half_v)
+        for pc in pose_conditions[candidate_tensor]
+    ])
+
+    denom = in_fov1.sum(0).clamp_min(1)
+    overlap_ratio = ((in_fov1.bool() & in_fov_list).sum(1)) / denom
+    candidate_frame_idx = frame_idx[candidate_tensor]
+    confidence = overlap_ratio + (curr_frame - candidate_frame_idx) / curr_frame * (-0.2)
+    confidence = confidence.masked_fill(~candidate_mask, -1e10)
+
+    best_confidence, local_r_idx = torch.max(confidence, dim=0)
+    selected_frames = candidate_tensor[local_r_idx]
+    batch_arange = torch.arange(batch_size, device=pose_conditions.device)
+    selected_overlap = overlap_ratio[local_r_idx, batch_arange]
+    return selected_frames.detach().cpu(), selected_overlap.detach().cpu()
+
+
 def tensor_max_with_number(tensor, number):
     number_tensor = torch.tensor(number, dtype=tensor.dtype, device=tensor.device)
     result = torch.max(tensor, number_tensor)
@@ -446,6 +493,46 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.ri_rarity_neighbors = int(getattr(cfg, "ri_rarity_neighbors", 3))
         if self.ri_rarity_neighbors < 1:
             raise ValueError("ri_rarity_neighbors must be >= 1")
+        # Retrieval's own FOV-overlap test (_generate_condition_indices), not
+        # a memory-policy knob -- was hardcoded (radius=30, num_samples=10000,
+        # fov_half_h=52.5, fov_half_v=37.5) with no way to change it. Defaults
+        # here match that exact prior behavior; only matters if overridden.
+        # Worth testing against MemCam's own overlap test, which uses a wider
+        # radius (its comments are explicit that its positions are UE
+        # centimeters divided by 100 to get meters, so its radius=50 is 50
+        # meters) against a narrower FOV and half as many samples -- three
+        # parameters that differ, not just one, so don't assume radius alone
+        # explains a gap without actually testing it.
+        self.retrieval_fov_radius = float(getattr(cfg, "retrieval_fov_radius", 30.0))
+        self.retrieval_fov_samples = int(getattr(cfg, "retrieval_fov_samples", 10000))
+        self.retrieval_fov_half_h = float(getattr(cfg, "retrieval_fov_half_h", 105.0 / 2))
+        self.retrieval_fov_half_v = float(getattr(cfg, "retrieval_fov_half_v", 75.0 / 2))
+        if self.retrieval_fov_radius <= 0:
+            raise ValueError("retrieval_fov_radius must be positive")
+        if self.retrieval_fov_samples < 1:
+            raise ValueError("retrieval_fov_samples must be >= 1")
+        # Diagnostic only, off by default and zero cost when off: is the
+        # overlap-based winner a stable pick, or noise winning among near-tied
+        # candidates? When enabled, redoes the slot-0 winner pick with a fresh
+        # independent point draw at retrieval_fov_samples * each multiplier
+        # (default 1x/10x/50x -- the 1x resample isolates pure sampling noise
+        # at the retriever's actual precision; 50x is the closest-to-truth
+        # comparison point) and logs whether the winner flips. This adds real
+        # per-step cost when on -- use it on a short targeted probe run, not a
+        # full sweep.
+        self.trace_overlap_precision_check = bool(
+            getattr(cfg, "trace_overlap_precision_check", False)
+        )
+        overlap_precision_multipliers = getattr(
+            cfg, "overlap_precision_multipliers", "1,10,50"
+        )
+        self.overlap_precision_multipliers = [
+            int(value.strip())
+            for value in str(overlap_precision_multipliers).split(",")
+            if value.strip()
+        ]
+        if self.trace_overlap_precision_check and not self.overlap_precision_multipliers:
+            raise ValueError("overlap_precision_multipliers must be non-empty when enabled")
         if self.memory_bank_device not in {"cpu", "gpu"}:
             raise ValueError("memory_bank_device must be either 'cpu' or 'gpu'")
         if self.memory_reference_source not in {"predicted", "ground_truth"}:
@@ -1558,13 +1645,13 @@ class WorldMemMinecraft(DiffusionForcingBase):
             random_idx = np.asarray(selected_by_batch, dtype=np.int64).T
         else:
             # Generate points in a sphere and filter based on field of view
-            num_samples = 10000
-            radius = 30
+            num_samples = self.retrieval_fov_samples
+            radius = self.retrieval_fov_radius
             points = generate_points_in_sphere(num_samples, radius).to(pose_conditions.device)
             points = points[:, None].repeat(1, batch_size, 1)
             points += pose_conditions[curr_frame, :, :3][None]
-            fov_half_h = torch.tensor(105 / 2, device=pose_conditions.device)
-            fov_half_v = torch.tensor(75 / 2, device=pose_conditions.device)
+            fov_half_h = torch.tensor(self.retrieval_fov_half_h, device=pose_conditions.device)
+            fov_half_v = torch.tensor(self.retrieval_fov_half_v, device=pose_conditions.device)
 
             # in_fov1 = is_inside_fov_3d_hv(
             #     points, pose_conditions[curr_frame, :, :3],
@@ -1622,6 +1709,42 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 best_confidence, local_r_idx = torch.max(confidence, dim=0)
                 selected_frames = candidate_tensor[local_r_idx]
                 random_idx.append(selected_frames.cpu())
+
+                precision_check_by_batch = None
+                if self.trace_overlap_precision_check and slot_idx == 0:
+                    precision_check_by_batch = {}
+                    resamples = {}
+                    for multiplier in self.overlap_precision_multipliers:
+                        resample_frames, resample_overlaps = resample_overlap_winners(
+                            pose_conditions=pose_conditions,
+                            curr_frame=curr_frame,
+                            horizon=horizon,
+                            candidate_tensor=candidate_tensor,
+                            candidate_mask=candidate_mask,
+                            frame_idx=frame_idx,
+                            fov_half_h=fov_half_h,
+                            fov_half_v=fov_half_v,
+                            num_samples=self.retrieval_fov_samples * multiplier,
+                            radius=radius,
+                        )
+                        resamples[multiplier] = (resample_frames, resample_overlaps)
+                    for batch_index in range(batch_size):
+                        actual_frame = int(selected_frames[batch_index].item())
+                        entry = {
+                            "actual_winner": actual_frame,
+                            "actual_num_samples": int(num_samples),
+                        }
+                        for multiplier, (resample_frames, resample_overlaps) in resamples.items():
+                            resample_frame = int(resample_frames[batch_index].item())
+                            entry[f"resample_{multiplier}x_winner"] = resample_frame
+                            entry[f"resample_{multiplier}x_overlap"] = float(
+                                resample_overlaps[batch_index].item()
+                            )
+                            entry[f"resample_{multiplier}x_flipped"] = bool(
+                                resample_frame != actual_frame
+                            )
+                        precision_check_by_batch[batch_index] = entry
+
                 for batch_index in range(batch_size):
                     selected_frame = int(selected_frames[batch_index].item())
                     local_selected_idx = int(local_r_idx[batch_index].item())
@@ -1630,6 +1753,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     self._last_retrieval_trace.append(
                         {
                             "event": "memory_retrieval",
+                            **(
+                                {"overlap_precision_check": precision_check_by_batch[batch_index]}
+                                if precision_check_by_batch is not None
+                                else {}
+                            ),
                             "batch_index": batch_index,
                             "target_frame": int(curr_frame),
                             "target_horizon": int(horizon),

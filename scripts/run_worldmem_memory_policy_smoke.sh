@@ -242,7 +242,7 @@ cmd=(
   +algorithm.retrieval_fov_half_h="$RETRIEVAL_FOV_HALF_H"
   +algorithm.retrieval_fov_half_v="$RETRIEVAL_FOV_HALF_V"
   +algorithm.trace_overlap_precision_check="$TRACE_OVERLAP_PRECISION_CHECK"
-  +algorithm.overlap_precision_multipliers="$OVERLAP_PRECISION_MULTIPLIERS"
+  +algorithm.overlap_precision_multipliers="'$OVERLAP_PRECISION_MULTIPLIERS'"
   +algorithm.access_trace_path="$TRACE_PATH"
   +output_dir="$OUTPUT_DIR"
 )

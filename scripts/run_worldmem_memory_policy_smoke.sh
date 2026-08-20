@@ -38,6 +38,11 @@ TRACE_CANDIDATE_TOP_K="${TRACE_CANDIDATE_TOP_K:-16}"
 TRACE_CANDIDATE_SAMPLE_SIZE="${TRACE_CANDIDATE_SAMPLE_SIZE:-16}"
 TRACE_BANK_STATE="${TRACE_BANK_STATE:-false}"
 TRACE_BANK_MAX_FRAMES="${TRACE_BANK_MAX_FRAMES:-256}"
+TRACE_RETRIEVED_MEMORY_QUALITY="${TRACE_RETRIEVED_MEMORY_QUALITY:-false}"
+MEMORY_QUALITY_PSNR_CAP="${MEMORY_QUALITY_PSNR_CAP:-100}"
+GT_MEMORY_REPLAY_TARGET_FRAME="${GT_MEMORY_REPLAY_TARGET_FRAME:-}"
+GT_MEMORY_REPLAY_EXPECTED_INDICES="${GT_MEMORY_REPLAY_EXPECTED_INDICES:-}"
+GT_MEMORY_REPLAY_COMPUTE_DINO="${GT_MEMORY_REPLAY_COMPUTE_DINO:-false}"
 KCENTER_ARCHIVE_STRIDE="${KCENTER_ARCHIVE_STRIDE:-1}"
 KCENTER_VISUAL_WEIGHT="${KCENTER_VISUAL_WEIGHT:-0.5}"
 KCENTER_POSE_WEIGHT="${KCENTER_POSE_WEIGHT:-0.5}"
@@ -230,6 +235,9 @@ cmd=(
   +algorithm.trace_candidate_sample_size="$TRACE_CANDIDATE_SAMPLE_SIZE"
   +algorithm.trace_bank_state="$TRACE_BANK_STATE"
   +algorithm.trace_bank_max_frames="$TRACE_BANK_MAX_FRAMES"
+  +algorithm.trace_retrieved_memory_quality="$TRACE_RETRIEVED_MEMORY_QUALITY"
+  +algorithm.memory_quality_psnr_cap="$MEMORY_QUALITY_PSNR_CAP"
+  +algorithm.gt_memory_replay_compute_dino="$GT_MEMORY_REPLAY_COMPUTE_DINO"
   +algorithm.kcenter_archive_stride="$KCENTER_ARCHIVE_STRIDE"
   +algorithm.kcenter_visual_weight="$KCENTER_VISUAL_WEIGHT"
   +algorithm.kcenter_pose_weight="$KCENTER_POSE_WEIGHT"
@@ -253,6 +261,10 @@ fi
 if [ -n "$RETRIEVAL_CANDIDATE_CAP" ]; then
   cmd+=(+algorithm.retrieval_candidate_cap="$RETRIEVAL_CANDIDATE_CAP")
 fi
+if [ -n "$GT_MEMORY_REPLAY_TARGET_FRAME" ]; then
+  cmd+=(+algorithm.gt_memory_replay_target_frame="$GT_MEMORY_REPLAY_TARGET_FRAME")
+  cmd+=(+algorithm.gt_memory_replay_expected_indices="'$GT_MEMORY_REPLAY_EXPECTED_INDICES'")
+fi
 
 echo "WorldMem repo root: $WORLDMEM_REPO_ROOT"
 echo "Storage root: $STORAGE_ROOT"
@@ -270,6 +282,10 @@ echo "Memory policy seed: $MEMORY_POLICY_SEED"
 echo "Retrieval candidate cap: ${RETRIEVAL_CANDIDATE_CAP:-none}"
 echo "Trace candidate diagnostics: $TRACE_CANDIDATE_DIAGNOSTICS"
 echo "Trace bank state: $TRACE_BANK_STATE"
+echo "Trace retrieved-memory quality: $TRACE_RETRIEVED_MEMORY_QUALITY"
+echo "GT memory replay target frame: ${GT_MEMORY_REPLAY_TARGET_FRAME:-none}"
+echo "GT memory replay expected indices: ${GT_MEMORY_REPLAY_EXPECTED_INDICES:-none}"
+echo "GT memory replay DINO: $GT_MEMORY_REPLAY_COMPUTE_DINO"
 echo "K-center archive stride: $KCENTER_ARCHIVE_STRIDE"
 echo "K-center visual weight: $KCENTER_VISUAL_WEIGHT"
 echo "K-center pose weight: $KCENTER_POSE_WEIGHT"

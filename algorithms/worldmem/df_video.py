@@ -32,6 +32,7 @@ from .memory_policies import (
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
 )
+from .memory_diagnostics import image_quality_per_image, mean_quality
 import glob
 
 # Utility Functions
@@ -471,6 +472,29 @@ class WorldMemMinecraft(DiffusionForcingBase):
             int(getattr(cfg, "trace_bank_max_frames", 256)),
             1,
         )
+        self.trace_retrieved_memory_quality = bool(
+            getattr(cfg, "trace_retrieved_memory_quality", False)
+        )
+        self.memory_quality_psnr_cap = float(
+            getattr(cfg, "memory_quality_psnr_cap", 100.0)
+        )
+        replay_target_frame = getattr(cfg, "gt_memory_replay_target_frame", None)
+        self.gt_memory_replay_target_frame = (
+            None
+            if replay_target_frame in {None, "", "None"}
+            else int(replay_target_frame)
+        )
+        replay_expected_indices = getattr(
+            cfg, "gt_memory_replay_expected_indices", ""
+        )
+        self.gt_memory_replay_expected_indices = [
+            int(value.strip())
+            for value in str(replay_expected_indices).strip("'\"").split(",")
+            if value.strip()
+        ]
+        self.gt_memory_replay_compute_dino = bool(
+            getattr(cfg, "gt_memory_replay_compute_dino", False)
+        )
         self.kcenter_archive_stride = max(int(getattr(cfg, "kcenter_archive_stride", 1)), 1)
         self.kcenter_visual_weight = float(getattr(cfg, "kcenter_visual_weight", 0.5))
         self.kcenter_pose_weight = float(getattr(cfg, "kcenter_pose_weight", 0.5))
@@ -554,6 +578,20 @@ class WorldMemMinecraft(DiffusionForcingBase):
             raise ValueError(
                 "retrieval_candidate_cap must be at least memory_condition_length"
             )
+        if self.gt_memory_replay_target_frame is not None:
+            if self.memory_reference_source != "predicted":
+                raise ValueError(
+                    "GT memory-cleaning replay requires memory_reference_source='predicted'"
+                )
+            if (
+                self.gt_memory_replay_expected_indices
+                and len(self.gt_memory_replay_expected_indices)
+                != self.memory_condition_length
+            ):
+                raise ValueError(
+                    "gt_memory_replay_expected_indices must contain exactly "
+                    "memory_condition_length frame indices"
+                )
         if self.memory_bank_device == "gpu" and not torch.cuda.is_available():
             raise ValueError("memory_bank_device='gpu' requires CUDA")
         if self.memory_policy in BUDGETED_MEMORY_POLICIES and self.memory_budget is None:
@@ -566,6 +604,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self._current_generation_seed = None
         self._memory_dino_features = []
         self._memory_rgb_features = []
+        self._gt_memory_replay_completed = False
         self.__dict__["_memory_dino_processor"] = None
         self.__dict__["_memory_dino_model"] = None
         self._stream_metric_sums = {"mse": 0.0, "psnr": 0.0, "lpips": 0.0}
@@ -591,7 +630,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
             ref_mode=self.ref_mode
         )
 
-        self.validation_lpips_model = LearnedPerceptualImagePatchSimilarity() if self.compute_eval_metrics else None
+        needs_lpips = (
+            self.compute_eval_metrics
+            or self.trace_retrieved_memory_quality
+            or self.gt_memory_replay_target_frame is not None
+        )
+        self.validation_lpips_model = (
+            LearnedPerceptualImagePatchSimilarity() if needs_lpips else None
+        )
         vae = VAE_models["vit-l-20-shallow-encoder"]()
         self.vae = vae.eval()
 
@@ -810,6 +856,140 @@ class WorldMemMinecraft(DiffusionForcingBase):
             if x.is_cuda:
                 torch.cuda.empty_cache()
         return torch.cat(decoded, dim=0)
+
+    def _quality_metrics_for_latents(self, latents, gt_rgb):
+        """Decode stored latents and score each decoded frame against dataset RGB."""
+        if latents.shape[:2] != gt_rgb.shape[:2]:
+            raise ValueError("latent and GT tensors must share time and batch dimensions")
+        vae_device = next(self.vae.parameters()).device
+        with torch.inference_mode():
+            decoded = self.decode_in_chunks(latents.to(vae_device)).clamp(0, 1)
+            prediction = rearrange(decoded, "t b c h w -> (t b) c h w").float()
+            target = rearrange(gt_rgb, "t b c h w -> (t b) c h w").to(
+                prediction.device,
+                dtype=torch.float32,
+            )
+            if target.shape[-2:] != prediction.shape[-2:]:
+                target = F.interpolate(
+                    target,
+                    size=prediction.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            metrics = image_quality_per_image(
+                prediction,
+                target,
+                lpips_model=self.validation_lpips_model,
+                psnr_cap=self.memory_quality_psnr_cap,
+            )
+        return {
+            key: value.detach().float().cpu()
+            for key, value in metrics.items()
+        }, decoded.detach()
+
+    def _trace_selected_memory_quality(
+        self,
+        random_idx,
+        memory_source_latents,
+        gt_latents,
+        xs_raw,
+        frame_idx,
+        curr_frame,
+        horizon,
+    ):
+        if not self.trace_retrieved_memory_quality:
+            return
+
+        batch_size = random_idx.shape[1]
+        source_indices = random_idx.to(memory_source_latents.device)
+        source_batch = torch.arange(batch_size, device=memory_source_latents.device)
+        selected_latents = memory_source_latents[
+            source_indices[:, source_batch], source_batch
+        ]
+        gt_indices = random_idx.to(gt_latents.device)
+        gt_batch = torch.arange(batch_size, device=gt_latents.device)
+        selected_gt_latents = gt_latents[gt_indices[:, gt_batch], gt_batch]
+        rgb_indices = random_idx.to(xs_raw.device)
+        rgb_batch = torch.arange(batch_size, device=xs_raw.device)
+        selected_gt_rgb = xs_raw[rgb_indices[:, rgb_batch], rgb_batch]
+        metrics, _ = self._quality_metrics_for_latents(
+            selected_latents,
+            selected_gt_rgb,
+        )
+        latent_mse = (
+            selected_latents.detach().float()
+            - selected_gt_latents.detach().float()
+        ).square().flatten(2).mean(2).cpu()
+        retrieval_by_slot = {
+            (int(row.get("context_slot", -1)), int(row.get("batch_index", 0))): row
+            for row in self._last_retrieval_trace
+        }
+
+        rows = []
+        for slot_index in range(random_idx.shape[0]):
+            for batch_index in range(batch_size):
+                flat_index = slot_index * batch_size + batch_index
+                selected_frame = int(random_idx[slot_index, batch_index].item())
+                retrieval = retrieval_by_slot.get((slot_index, batch_index), {})
+                rows.append(
+                    {
+                        "event": "retrieved_memory_quality",
+                        "batch_index": batch_index,
+                        "target_frame": int(curr_frame),
+                        "target_horizon": int(horizon),
+                        "context_slot": int(slot_index),
+                        "selected_memory_frame": selected_frame,
+                        "selected_original_frame_index": int(
+                            frame_idx[selected_frame, batch_index].item()
+                        ),
+                        "source_is_initial_context": bool(
+                            selected_frame < int(self._current_context_frames or 0)
+                        ),
+                        "selected_overlap": retrieval.get("selected_overlap"),
+                        "selected_confidence": retrieval.get("selected_confidence"),
+                        "decoded_memory_mse": float(metrics["mse"][flat_index].item()),
+                        "decoded_memory_psnr": float(metrics["psnr"][flat_index].item()),
+                        "decoded_memory_ssim": float(metrics["ssim"][flat_index].item()),
+                        "decoded_memory_lpips": float(metrics["lpips"][flat_index].item()),
+                        "memory_latent_mse": float(latent_mse[slot_index, batch_index].item()),
+                    }
+                )
+        self._write_access_trace_many(rows)
+
+    def _trace_following_chunk_quality(
+        self,
+        predicted_latents,
+        xs_raw,
+        frame_idx,
+        curr_frame,
+        horizon,
+    ):
+        if not self.trace_retrieved_memory_quality:
+            return
+        gt_rgb = xs_raw[curr_frame : curr_frame + horizon]
+        metrics, _ = self._quality_metrics_for_latents(predicted_latents, gt_rgb)
+        batch_size = predicted_latents.shape[1]
+        rows = []
+        for offset in range(horizon):
+            for batch_index in range(batch_size):
+                flat_index = offset * batch_size + batch_index
+                rows.append(
+                    {
+                        "event": "following_chunk_frame_quality",
+                        "batch_index": batch_index,
+                        "target_frame": int(curr_frame),
+                        "target_horizon": int(horizon),
+                        "generated_frame": int(curr_frame + offset),
+                        "generated_original_frame_index": int(
+                            frame_idx[curr_frame + offset, batch_index].item()
+                        ),
+                        "following_chunk_mse": float(metrics["mse"][flat_index].item()),
+                        "following_chunk_psnr": float(metrics["psnr"][flat_index].item()),
+                        "following_chunk_ssim": float(metrics["ssim"][flat_index].item()),
+                        "following_chunk_lpips": float(metrics["lpips"][flat_index].item()),
+                    }
+                )
+        self._write_access_trace_many(rows)
 
     def _open_access_trace(self):
         if not self.access_trace_path or self._access_trace_handle is not None:
@@ -1897,6 +2077,222 @@ class WorldMemMinecraft(DiffusionForcingBase):
         to_noise_levels = torch.from_numpy(to_noise_levels).to(self.device)
         return from_noise_levels, to_noise_levels
 
+    def _gather_reference_latents(self, source_latents, random_idx, device):
+        batch_size = random_idx.shape[1]
+        indices = random_idx.to(source_latents.device)
+        batch_indices = torch.arange(batch_size, device=source_latents.device)
+        references = source_latents[indices[:, batch_indices], batch_indices]
+        return references.to(device, non_blocking=True).clone()
+
+    def _capture_torch_rng_state(self):
+        state = {"cpu": torch.get_rng_state()}
+        if torch.cuda.is_available():
+            state["cuda"] = torch.cuda.get_rng_state_all()
+        return state
+
+    def _restore_torch_rng_state(self, state):
+        torch.set_rng_state(state["cpu"])
+        if "cuda" in state and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(state["cuda"])
+
+    def _sample_replay_state(
+        self,
+        sample_state,
+        scheduling_matrix,
+        input_condition,
+        input_pose_condition,
+        curr_frame,
+        start_frame,
+        batch_size,
+        memory_condition_length,
+        frame_idx_list,
+    ):
+        for step in range(scheduling_matrix.shape[0] - 1):
+            from_noise_levels, to_noise_levels = self._prepare_noise_levels(
+                scheduling_matrix,
+                step,
+                curr_frame,
+                batch_size,
+                memory_condition_length,
+            )
+            sample_state = self.diffusion_model.sample_step(
+                sample_state,
+                input_condition,
+                input_pose_condition,
+                from_noise_levels[start_frame:],
+                to_noise_levels[start_frame:],
+                current_frame=curr_frame,
+                mode="validation",
+                reference_length=memory_condition_length,
+                frame_idx=frame_idx_list,
+            )
+        return sample_state
+
+    def _dino_distance_per_image(self, prediction, target):
+        if not self.gt_memory_replay_compute_dino:
+            return None, None
+        processor, model = self._ensure_memory_dino_model()
+        model_device = next(model.parameters()).device
+
+        def features(images):
+            uint8_images = [
+                frame.detach().float().cpu().permute(1, 2, 0)
+                .mul(255).round().byte().numpy()
+                for frame in images.clamp(0, 1)
+            ]
+            inputs = processor(images=uint8_images, return_tensors="pt")
+            inputs = {key: value.to(model_device) for key, value in inputs.items()}
+            with torch.inference_mode():
+                outputs = model(**inputs)
+                result = getattr(outputs, "pooler_output", None)
+                if result is None:
+                    result = outputs.last_hidden_state[:, 0]
+            return F.normalize(result.detach().float(), dim=-1)
+
+        pred_features = features(prediction)
+        target_features = features(target)
+        distances = 1.0 - (pred_features * target_features).sum(1).clamp(-1, 1)
+        return distances.detach().cpu(), target_features.detach().cpu()
+
+    def _record_gt_memory_replay(
+        self,
+        control_state,
+        cleaned_state,
+        control_references,
+        cleaned_references,
+        random_idx,
+        xs_raw,
+        frame_idx,
+        curr_frame,
+        horizon,
+        start_frame,
+        replacement_mask,
+        preintervention_max_abs_diff,
+        non_memory_input_max_abs_diff,
+    ):
+        memory_length = random_idx.shape[0]
+        chunk_offset = curr_frame - start_frame
+        control_chunk = control_state[
+            chunk_offset : chunk_offset + horizon
+        ]
+        cleaned_chunk = cleaned_state[
+            chunk_offset : chunk_offset + horizon
+        ]
+        gt_rgb = xs_raw[curr_frame : curr_frame + horizon]
+        control_metrics, control_decoded = self._quality_metrics_for_latents(
+            control_chunk,
+            gt_rgb,
+        )
+        cleaned_metrics, cleaned_decoded = self._quality_metrics_for_latents(
+            cleaned_chunk,
+            gt_rgb,
+        )
+        control_rgb = rearrange(control_decoded, "t b c h w -> (t b) c h w")
+        cleaned_rgb = rearrange(cleaned_decoded, "t b c h w -> (t b) c h w")
+        target_rgb = rearrange(gt_rgb, "t b c h w -> (t b) c h w").to(
+            control_rgb.device,
+            dtype=torch.float32,
+        )
+        if target_rgb.shape[-2:] != control_rgb.shape[-2:]:
+            target_rgb = F.interpolate(
+                target_rgb,
+                size=control_rgb.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        control_dino, _ = self._dino_distance_per_image(control_rgb, target_rgb)
+        cleaned_dino, _ = self._dino_distance_per_image(cleaned_rgb, target_rgb)
+
+        batch_size = random_idx.shape[1]
+        reference_delta = (
+            control_references.detach().float()
+            - cleaned_references.detach().float()
+        ).square().flatten(2).mean(2).cpu()
+        selected_indices = [
+            int(random_idx[slot, 0].item())
+            for slot in range(memory_length)
+        ]
+
+        for slot_index in range(memory_length):
+            for batch_index in range(batch_size):
+                selected_frame = int(random_idx[slot_index, batch_index].item())
+                self._write_access_trace(
+                    {
+                        "event": "gt_memory_replay_replacement",
+                        "batch_index": batch_index,
+                        "target_frame": int(curr_frame),
+                        "context_slot": int(slot_index),
+                        "selected_memory_frame": selected_frame,
+                        "selected_original_frame_index": int(
+                            frame_idx[selected_frame, batch_index].item()
+                        ),
+                        "replaced_with_gt": bool(
+                            replacement_mask[slot_index, batch_index].item()
+                        ),
+                        "replacement_same_frame_index": True,
+                        "control_vs_cleaned_latent_mse": float(
+                            reference_delta[slot_index, batch_index].item()
+                        ),
+                    }
+                )
+
+        control_mean = mean_quality(control_metrics)
+        cleaned_mean = mean_quality(cleaned_metrics)
+        summary = {
+            "event": "gt_memory_cleaning_replay",
+            "target_frame": int(curr_frame),
+            "target_horizon": int(horizon),
+            "selected_memory_frames": selected_indices,
+            "expected_memory_frames": self.gt_memory_replay_expected_indices,
+            "retrieved_frame_identities_match": bool(
+                not self.gt_memory_replay_expected_indices
+                or selected_indices == self.gt_memory_replay_expected_indices
+            ),
+            "preintervention_max_abs_diff": float(preintervention_max_abs_diff),
+            "non_memory_input_max_abs_diff": float(non_memory_input_max_abs_diff),
+            "replaced_slots": int(replacement_mask.sum().item()),
+            "control_continues_rollout": True,
+        }
+        for metric in ("mse", "psnr", "ssim", "lpips"):
+            summary[f"control_{metric}"] = control_mean[metric]
+            summary[f"gt_cleaned_{metric}"] = cleaned_mean[metric]
+            summary[f"delta_{metric}"] = cleaned_mean[metric] - control_mean[metric]
+        if control_dino is not None and cleaned_dino is not None:
+            summary["control_dino_distance"] = float(control_dino.mean().item())
+            summary["gt_cleaned_dino_distance"] = float(cleaned_dino.mean().item())
+            summary["delta_dino_distance"] = float(
+                cleaned_dino.mean().item() - control_dino.mean().item()
+            )
+        self._write_access_trace(summary)
+
+        rows = []
+        for offset in range(horizon):
+            for batch_index in range(batch_size):
+                flat_index = offset * batch_size + batch_index
+                row = {
+                    "event": "gt_memory_cleaning_replay_frame",
+                    "batch_index": batch_index,
+                    "target_frame": int(curr_frame),
+                    "generated_frame": int(curr_frame + offset),
+                    "generated_original_frame_index": int(
+                        frame_idx[curr_frame + offset, batch_index].item()
+                    ),
+                }
+                for metric in ("mse", "psnr", "ssim", "lpips"):
+                    control_value = float(control_metrics[metric][flat_index].item())
+                    cleaned_value = float(cleaned_metrics[metric][flat_index].item())
+                    row[f"control_{metric}"] = control_value
+                    row[f"gt_cleaned_{metric}"] = cleaned_value
+                    row[f"delta_{metric}"] = cleaned_value - control_value
+                if control_dino is not None and cleaned_dino is not None:
+                    row["control_dino_distance"] = float(control_dino[flat_index].item())
+                    row["gt_cleaned_dino_distance"] = float(cleaned_dino[flat_index].item())
+                    row["delta_dino_distance"] = float(
+                        cleaned_dino[flat_index].item() - control_dino[flat_index].item()
+                    )
+                rows.append(row)
+        self._write_access_trace_many(rows)
+
     def validation_step(self, batch, batch_idx, namespace="validation") -> STEP_OUTPUT:
         """
         Perform a single validation step.
@@ -1917,6 +2313,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self._seed_generation_for_batch(global_batch_idx)
         self._memory_dino_features = []
         self._memory_rgb_features = []
+        self._gt_memory_replay_completed = False
         run_start_time = time.perf_counter()
         timing = {
             "retrieval_seconds": 0.0,
@@ -1987,6 +2384,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "dataset_batch_idx": int(global_batch_idx),
                 "generation_seed": self._current_generation_seed,
                 "memory_policy_seed": int(self.memory_policy_seed),
+                "trace_retrieved_memory_quality": self.trace_retrieved_memory_quality,
+                "gt_memory_replay_target_frame": self.gt_memory_replay_target_frame,
+                "gt_memory_replay_expected_indices": self.gt_memory_replay_expected_indices,
+                "gt_memory_replay_compute_dino": self.gt_memory_replay_compute_dino,
             }
         )
         self._record_memory_bank_diagnostics(
@@ -2016,6 +2417,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
             # Handle condition similarity logic
             memory_refs_gpu = None
+            replay_this_chunk = (
+                self.gt_memory_replay_target_frame is not None
+                and curr_frame == self.gt_memory_replay_target_frame
+            )
+            replay_base_state = None
+            replay_control_references = None
+            replay_cleaned_references = None
+            replay_replacement_mask = None
             if memory_condition_length:
                 candidate_indices = self._memory_candidate_lists(
                     memory_buffers,
@@ -2045,24 +2454,55 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     self._sync_cuda_if_needed()
                     timing["retrieval_seconds"] += time.perf_counter() - section_start
 
+                memory_source_latents = (
+                    xs
+                    if self.memory_reference_source == "ground_truth"
+                    else xs_pred
+                )
+                self._trace_selected_memory_quality(
+                    random_idx=random_idx,
+                    memory_source_latents=memory_source_latents,
+                    gt_latents=xs,
+                    xs_raw=xs_raw,
+                    frame_idx=frame_idx,
+                    curr_frame=curr_frame,
+                    horizon=horizon,
+                )
+                if replay_this_chunk:
+                    if batch_size != 1:
+                        raise ValueError("GT memory-cleaning replay requires batch_size=1")
+                    selected_indices = [
+                        int(random_idx[slot_index, 0].item())
+                        for slot_index in range(random_idx.shape[0])
+                    ]
+                    if (
+                        self.gt_memory_replay_expected_indices
+                        and selected_indices != self.gt_memory_replay_expected_indices
+                    ):
+                        raise RuntimeError(
+                            "GT replay selected-memory identity mismatch: "
+                            f"expected {self.gt_memory_replay_expected_indices}, "
+                            f"got {selected_indices}"
+                        )
+                    replay_base_state = xs_pred[start_frame:].to(
+                        conditions.device
+                    ).clone()
                 if self.memory_bank_device == "gpu":
-                    memory_source_latents = (
-                        xs
-                        if self.memory_reference_source == "ground_truth"
-                        else xs_pred
-                    )
                     memory_refs_gpu = self._gather_gpu_memory_references(
                         gpu_memory_bank,
                         random_idx,
                         memory_source_latents,
                         device=conditions.device,
                     )
+                    if replay_this_chunk:
+                        replay_control_references = memory_refs_gpu.clone()
                 else:
-                    memory_source_latents = (
-                        xs
-                        if self.memory_reference_source == "ground_truth"
-                        else xs_pred
-                    )
+                    if replay_this_chunk:
+                        replay_control_references = self._gather_reference_latents(
+                            memory_source_latents,
+                            random_idx,
+                            conditions.device,
+                        )
                     xs_pred = torch.cat(
                         [
                             xs_pred,
@@ -2072,6 +2512,23 @@ class WorldMemMinecraft(DiffusionForcingBase):
                             ].clone(),
                         ],
                         0,
+                    )
+                if replay_this_chunk:
+                    gt_references = self._gather_reference_latents(
+                        xs,
+                        random_idx,
+                        conditions.device,
+                    )
+                    replay_cleaned_references = replay_control_references.clone()
+                    replay_replacement_mask = random_idx.to(conditions.device) >= int(
+                        n_context_frames
+                    )
+                    if not replay_replacement_mask.any():
+                        raise RuntimeError(
+                            "GT replay target selected no generated memory frames"
+                        )
+                    replay_cleaned_references[replay_replacement_mask] = (
+                        gt_references[replay_replacement_mask]
                     )
 
             # Prepare input conditions and pose conditions
@@ -2084,42 +2541,110 @@ class WorldMemMinecraft(DiffusionForcingBase):
             if self.profile_timing:
                 self._sync_cuda_if_needed()
                 section_start = time.perf_counter()
-            for m in range(scheduling_matrix.shape[0] - 1):
-                from_noise_levels, to_noise_levels = self._prepare_noise_levels(
-                    scheduling_matrix, m, curr_frame, batch_size, memory_condition_length
+            if replay_this_chunk:
+                rng_before = self._capture_torch_rng_state()
+                control_input_state = torch.cat(
+                    [replay_base_state.clone(), replay_control_references],
+                    dim=0,
                 )
-
+                cleaned_input_state = torch.cat(
+                    [replay_base_state.clone(), replay_cleaned_references],
+                    dim=0,
+                )
+                non_memory_input_max_abs_diff = float(
+                    (
+                        control_input_state[:-memory_condition_length]
+                        - cleaned_input_state[:-memory_condition_length]
+                    ).abs().max().detach().cpu().item()
+                )
+                preintervention_max_abs_diff = non_memory_input_max_abs_diff
+                control_state = self._sample_replay_state(
+                    control_input_state,
+                    scheduling_matrix,
+                    input_condition,
+                    input_pose_condition,
+                    curr_frame,
+                    start_frame,
+                    batch_size,
+                    memory_condition_length,
+                    frame_idx_list,
+                )
+                rng_after_control = self._capture_torch_rng_state()
+                self._restore_torch_rng_state(rng_before)
+                cleaned_state = self._sample_replay_state(
+                    cleaned_input_state,
+                    scheduling_matrix,
+                    input_condition,
+                    input_pose_condition,
+                    curr_frame,
+                    start_frame,
+                    batch_size,
+                    memory_condition_length,
+                    frame_idx_list,
+                )
+                self._restore_torch_rng_state(rng_after_control)
+                self._record_gt_memory_replay(
+                    control_state=control_state,
+                    cleaned_state=cleaned_state,
+                    control_references=replay_control_references,
+                    cleaned_references=replay_cleaned_references,
+                    random_idx=random_idx,
+                    xs_raw=xs_raw,
+                    frame_idx=frame_idx,
+                    curr_frame=curr_frame,
+                    horizon=horizon,
+                    start_frame=start_frame,
+                    replacement_mask=replay_replacement_mask,
+                    preintervention_max_abs_diff=preintervention_max_abs_diff,
+                    non_memory_input_max_abs_diff=non_memory_input_max_abs_diff,
+                )
+                # Counterfactual decoding/LPIPS/DINO must not perturb the
+                # official control continuation, even if a dependency draws RNG.
+                self._restore_torch_rng_state(rng_after_control)
                 if memory_refs_gpu is not None:
-                    if m == 0:
-                        sample_state = torch.cat(
-                            [xs_pred[start_frame:].to(input_condition.device), memory_refs_gpu],
-                            dim=0,
-                        )
-                    sample_state = self.diffusion_model.sample_step(
-                        sample_state,
-                        input_condition,
-                        input_pose_condition,
-                        from_noise_levels[start_frame:],
-                        to_noise_levels[start_frame:],
-                        current_frame=curr_frame,
-                        mode="validation",
-                        reference_length=memory_condition_length,
-                        frame_idx=frame_idx_list
-                    )
+                    xs_pred[start_frame:] = control_state[
+                        :-memory_condition_length
+                    ].cpu()
                 else:
-                    xs_pred[start_frame:] = self.diffusion_model.sample_step(
-                        xs_pred[start_frame:].to(input_condition.device),
-                        input_condition,
-                        input_pose_condition,
-                        from_noise_levels[start_frame:],
-                        to_noise_levels[start_frame:],
-                        current_frame=curr_frame,
-                        mode="validation",
-                        reference_length=memory_condition_length,
-                        frame_idx=frame_idx_list
-                    ).cpu()
-            if memory_refs_gpu is not None:
-                xs_pred[start_frame:] = sample_state[:-memory_condition_length].cpu()
+                    xs_pred[start_frame:] = control_state.cpu()
+                self._gt_memory_replay_completed = True
+            else:
+                for m in range(scheduling_matrix.shape[0] - 1):
+                    from_noise_levels, to_noise_levels = self._prepare_noise_levels(
+                        scheduling_matrix, m, curr_frame, batch_size, memory_condition_length
+                    )
+
+                    if memory_refs_gpu is not None:
+                        if m == 0:
+                            sample_state = torch.cat(
+                                [xs_pred[start_frame:].to(input_condition.device), memory_refs_gpu],
+                                dim=0,
+                            )
+                        sample_state = self.diffusion_model.sample_step(
+                            sample_state,
+                            input_condition,
+                            input_pose_condition,
+                            from_noise_levels[start_frame:],
+                            to_noise_levels[start_frame:],
+                            current_frame=curr_frame,
+                            mode="validation",
+                            reference_length=memory_condition_length,
+                            frame_idx=frame_idx_list
+                        )
+                    else:
+                        xs_pred[start_frame:] = self.diffusion_model.sample_step(
+                            xs_pred[start_frame:].to(input_condition.device),
+                            input_condition,
+                            input_pose_condition,
+                            from_noise_levels[start_frame:],
+                            to_noise_levels[start_frame:],
+                            current_frame=curr_frame,
+                            mode="validation",
+                            reference_length=memory_condition_length,
+                            frame_idx=frame_idx_list
+                        ).cpu()
+                if memory_refs_gpu is not None:
+                    xs_pred[start_frame:] = sample_state[:-memory_condition_length].cpu()
             if self.profile_timing:
                 self._sync_cuda_if_needed()
                 timing["sampling_seconds"] += time.perf_counter() - section_start
@@ -2127,6 +2652,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
             # Remove condition similarity frames if applicable
             if memory_condition_length and memory_refs_gpu is None:
                 xs_pred = xs_pred[:-memory_condition_length]
+
+            self._trace_following_chunk_quality(
+                predicted_latents=xs_pred[curr_frame : curr_frame + horizon],
+                xs_raw=xs_raw,
+                frame_idx=frame_idx,
+                curr_frame=curr_frame,
+                horizon=horizon,
+            )
 
             if self.profile_timing:
                 self._sync_cuda_if_needed()
@@ -2162,6 +2695,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
             pbar.update(horizon)
 
         pbar.close()
+        if (
+            self.gt_memory_replay_target_frame is not None
+            and not self._gt_memory_replay_completed
+        ):
+            raise RuntimeError(
+                "GT memory-cleaning replay target was not reached: "
+                f"target_frame={self.gt_memory_replay_target_frame}"
+            )
         self._write_cuda_memory_trace(
             "cuda_memory_after_generation_before_decode",
             namespace=namespace,

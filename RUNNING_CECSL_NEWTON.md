@@ -1788,6 +1788,243 @@ SEEDS=101 \
 bash scripts/run_worldmem_memory_mechanisms.sh
 ```
 
+## Retrieved-Memory Corruption Experiments
+
+These experiments test whether unbounded WorldMem increasingly conditions on its
+own corrupted generated latents. Both experiments use complete 60-second videos
+and report the final quarter separately (`45-60s`).
+
+The runtime metric path scores the exact stored latent used for conditioning:
+
+1. gather the selected latent at its original memory index;
+2. decode it with WorldMem's loaded VAE;
+3. compare the decoded result with dataset RGB at the same frame/trajectory index;
+4. score the immediately following generated chunk the same way.
+
+Metrics are PSNR, SSIM, LPIPS, and latent MSE. Repeated retrievals remain repeated
+rows because they are repeated conditioning exposures. PSNR is capped at 100 dB
+for exact equality so JSON/CSV summaries remain finite. The analysis reports the
+mean and mean of the worst-quality decile: lowest 10% for PSNR/SSIM and highest
+10% for LPIPS.
+
+### Experiment 1 Pilot on CECSL GPU 1
+
+This generates one matched trajectory for unbounded, best FIFO (b128), best RI
+(b32), and best SLAM (b16). Use the pilot to verify that all four traces contain
+`retrieved_memory_quality` and `following_chunk_frame_quality` events.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_quality_60s_pilot \
+NUM_VIDEOS=1 \
+POLICY_SPECS=unbounded:,fifo:128,rarity_irreplaceability:32,slam_covisibility:16 \
+bash scripts/run_worldmem_retrieved_memory_quality.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/memory_quality_pilot_gpu1_$(date +%F_%H%M).log
+```
+
+Analyze the pilot:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_quality_60s_pilot \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_quality_60s_pilot/metrics/retrieved_memory_quality \
+REPLAY_COUNT=1 \
+bash scripts/analyze_worldmem_retrieved_memory_quality.sh
+```
+
+### Experiment 1 Full Run
+
+After the pilot table looks sensible, run 15 matched trajectories per policy:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_quality_60s \
+NUM_VIDEOS=15 \
+GLOBAL_SEED=101 \
+DATASET_SEED=42 \
+POLICY_SPECS=unbounded:,fifo:128,rarity_irreplaceability:32,slam_covisibility:16 \
+bash scripts/run_worldmem_retrieved_memory_quality.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/memory_quality_60s_n15_gpu1_$(date +%F_%H%M).log
+```
+
+The runner is resume-aware. Rerunning the same command skips complete videos and
+continues incomplete policy runs.
+
+Aggregate the exact latent-decoding measurements and select four late-horizon
+unbounded replay events from different trajectories:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_quality_60s \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieved_memory_quality \
+LATE_START_SEC=45 \
+REPLAY_COUNT=4 \
+bash scripts/analyze_worldmem_retrieved_memory_quality.sh
+```
+
+Important outputs:
+
+```text
+metrics/retrieved_memory_quality/run_summary.csv
+metrics/retrieved_memory_quality/paired_bounded_minus_unbounded.csv
+metrics/retrieved_memory_quality/retrieval_following_correlations.csv
+metrics/retrieved_memory_quality/chunk_quality.csv
+metrics/retrieved_memory_quality/figures/
+metrics/retrieved_memory_quality/gt_replay_manifest.json
+```
+
+### Experiment 2: Fixed-History GT Memory-Cleaning Replay
+
+The analyzer ranks one high-corruption event per trajectory and writes the top
+four to `gt_replay_manifest.json`. The replay regenerates each selected trajectory
+up to that event, then creates two next-chunk branches:
+
+- control: the originally selected generated memory latents;
+- cleaned: VAE-encoded dataset GT content at the exact same selected indices.
+
+Both branches share the preceding generated state, chunk noise, poses, actions,
+retrieved frame IDs, and diffusion RNG state. The cleaned branch is scored and
+discarded; only control continues. The run fails if the selected IDs differ from
+the manifest or if no generated memory was replaced.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+QUALITY_ROOT=/data/ab575577/worldmem/outputs/memory_quality_60s \
+MANIFEST=/data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieved_memory_quality/gt_replay_manifest.json \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/gt_memory_replay_60s \
+COMPUTE_DINO=true \
+bash scripts/run_worldmem_gt_memory_replay.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/gt_memory_replay_gpu1_$(date +%F_%H%M).log
+```
+
+Set `COMPUTE_DINO=false` if DINOv2 is unavailable; PSNR, SSIM, and LPIPS still
+run. The replay summary uses `GT-cleaned - control`, so positive PSNR/SSIM and
+negative LPIPS/DINO deltas indicate improvement.
+
+```text
+/data/ab575577/worldmem/outputs/gt_memory_replay_60s/metrics/replay_events.csv
+/data/ab575577/worldmem/outputs/gt_memory_replay_60s/metrics/replay_delta_summary.csv
+/data/ab575577/worldmem/outputs/gt_memory_replay_60s/metrics/replay_validity.json
+```
+
+Do not interpret Experiment 1 alone as causal: deteriorating memories and outputs
+share prior generated history. Experiment 2 is the causal test because it changes
+only retrieved content for the immediately following chunk.
+
+### Newton Paths
+
+Use the same commands with an explicit cluster storage root and data symlink/path:
+
+```bash
+WORLDMEM_STORAGE_ROOT=$SCRATCH/worldmem \
+OUTPUT_ROOT=$SCRATCH/worldmem/outputs/memory_quality_60s \
+GPU=0 \
+bash scripts/run_worldmem_retrieved_memory_quality.sh
+```
+
+Never use `/data/ab575577` on Newton.
+
+## Experiment Status (2026-08-20)
+
+### MCE Port
+
+WorldMem now includes the MemCam Marginal Coverage Eviction (`mce`) policy:
+
+- noisy-OR marginal coverage objective;
+- additive visual/pose kernel;
+- historical-query-only medoids (`lambda=1`);
+- reverse-deletion eviction;
+- log-space accumulation, which avoids overflow while reducing WorldMem's roughly
+  600-frame initial context to a small budget;
+- independent `mce_rarity_neighbors` and `ri_rarity_neighbors` controls.
+
+The working implementation has been checked against the original overflow failure
+shape and randomized policy tests. The old one-nearest-neighbor behavior remains
+available by explicitly setting the corresponding neighbor count to `1`.
+
+### Main 60-Second LPIPS Result
+
+The current comparison uses 15 videos per cell, a 60-second prediction horizon,
+eight retrieved conditioning frames (`K=8`), and budgets 16, 32, 64, and 128.
+Lower LPIPS is better.
+
+| Policy | b16 | b32 | b64 | b128 |
+| --- | ---: | ---: | ---: | ---: |
+| FIFO | 0.717 | 0.689 | 0.688 | 0.647 |
+| Rarity x irreplaceability | 0.566 | 0.546 | 0.549 | 0.567 |
+| SLAM covisibility | **0.525** | **0.534** | **0.545** | 0.577 |
+| K-center coreset | 0.545 | 0.559 | 0.575 | **0.559** |
+| MCE | 0.576 | 0.575 | 0.596 | 0.604 |
+| Unbounded | - | - | - | 0.652 |
+
+MCE beats FIFO at every budget but trails RI, SLAM, and K-center. It also gets
+worse above budget 32. The central caveat is that all budgets exceed `K=8`, so
+these results measure the joint effect of eviction and retrieval rather than
+eviction in isolation.
+
+### Current Mechanism Finding
+
+The evidence does not support retrieval hogging as the reason unbounded memory is
+worse. Unbounded and FIFO have the least concentrated retrieval, while SLAM has
+the most concentrated retrieval and better quality.
+
+The strongest finding so far is instead the zero-overlap fallback:
+
+- roughly 70-80% of retrieval calls select with exactly zero geometric overlap
+  across every tested policy;
+- unbounded and FIFO then fall back to recent frames because ties inherit the
+  recency preference;
+- content-based eviction removes many fresh-but-redundant frames, so its zero-
+  overlap fallback reaches farther into history;
+- SLAM's median fallback age is monotonic across budgets 16/32/64/128:
+  `213 / 81 / 28 / 13` frames, matching its LPIPS trend;
+- RI at budget 32 reaches age 111, showing that this is a broader property of
+  content-based retention rather than a SLAM-only effect.
+
+Increasing the Monte Carlo overlap precision from 1x to 50x did not remove the
+winner flips. The observed ties are therefore geometric, not merely sampling
+noise. WorldMem currently uses radius 30, 10,000 samples, and a 52.5 by 37.5
+degree half-FOV. MemCam uses radius 50 with a different FOV and sample count, so
+radius alone should be treated as a controlled ablation rather than a direct
+method match.
+
+### Open Runs
+
+1. Run the radius-50 controlled probe. This is the most direct remaining test of
+   whether WorldMem's geometric scale causes the high zero-overlap rate.
+2. Run VBench and VBench-Long. The wrappers are implemented but no values have
+   been collected yet.
+3. Do not use CUT3R for paper claims until its ground-truth sanity check produces
+   sensible camera errors. The current GT sanity result fails that requirement.
+4. Explain why `rarity_neighbors=8` helps MemCam but not WorldMem. On WorldMem MCE
+   b64 it changed LPIPS only from about 0.596 to 0.598.
+5. Optionally trace K-center and MCE fallback ages to test whether the same
+   long-history fallback mechanism explains their ranking.
+
 ## Common Issues
 
 - `ModuleNotFoundError`: reactivate `conda activate worldmem`, then reinstall missing packages.

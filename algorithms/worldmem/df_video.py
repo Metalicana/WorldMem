@@ -2527,6 +2527,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
                         raise RuntimeError(
                             "GT replay target selected no generated memory frames"
                         )
+                    gt_references = gt_references.to(
+                        device=replay_cleaned_references.device,
+                        dtype=replay_cleaned_references.dtype,
+                    )
                     replay_cleaned_references[replay_replacement_mask] = (
                         gt_references[replay_replacement_mask]
                     )

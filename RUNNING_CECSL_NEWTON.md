@@ -2012,6 +2012,32 @@ degree half-FOV. MemCam uses radius 50 with a different FOV and sample count, so
 radius alone should be treated as a controlled ablation rather than a direct
 method match.
 
+### Retrieved-Memory Quality Pilot
+
+The one-trajectory, 60-second pilot completed successfully. The table below uses
+only retrieved references that came from generated frames, while the final
+column scores the chunk generated immediately after retrieval. Late means
+45-60 seconds. Lower LPIPS and higher PSNR/SSIM are better.
+
+| Policy | Generated-reference fraction | Retrieved PSNR | Retrieved SSIM | Retrieved LPIPS | Following-chunk LPIPS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SLAM covisibility b16 | 0.744 | **15.09** | **0.453** | **0.421** | **0.661** |
+| RI b32 | 0.892 | 11.01 | 0.345 | 0.693 | 0.775 |
+| FIFO b128 | 1.000 | 7.36 | 0.217 | 0.760 | 0.761 |
+| Unbounded | 0.935 | 6.60 | 0.099 | 0.914 | 0.914 |
+
+The worst-decile retrieved-memory LPIPS values were 0.694 for SLAM, 0.781 for
+RI, 0.802 for FIFO, and 0.996 for unbounded. Relative to unbounded, SLAM's
+retrieved generated memories improved by 8.49 dB PSNR, 0.354 SSIM, and 0.494
+LPIPS; its following chunk improved by 0.253 LPIPS.
+
+This pilot supports two possible memory-mediated pathways: SLAM has less exposure
+to generated references, and the generated references it does retrieve are much
+cleaner. The generated-only comparison shows that the first pathway cannot by
+itself explain the result. However, this is still one matched trajectory and is
+observational. Do not claim causality until the fixed-history GT memory-cleaning
+replay improves the next chunk and the result repeats across the 15-video run.
+
 ### Open Runs
 
 1. Run the radius-50 controlled probe. This is the most direct remaining test of
@@ -2032,6 +2058,7 @@ method match.
 - CUDA architecture errors: reinstall a newer PyTorch CUDA wheel, especially on the CECSL A6000 Pro/newer GPU.
 - `ImportError: cannot import name 'read_video' from 'torchvision.io'`: newer `torchvision` versions removed the eager `read_video` import. This repo has been patched to lazily import `read_video` and fall back to OpenCV in `algorithms/worldmem/models/utils.py`.
 - `AttributeError: 'float' object has no attribute 'detach'` in `_accumulate_stream_metrics`: LPIPS can return a Python float while MSE/PSNR return tensors. This repo's streaming metric path now handles both, but memory-policy sweeps disable eval metrics by default.
+- `Index put requires the source and destination dtypes match` during GT memory replay: VAE-encoded GT references may be FP16 while the control replay state is FP32. The replay path now casts GT references to the control tensor's device and dtype before masked replacement.
 - Home directory fills up: re-check `HF_HOME`, `WANDB_DIR`, `WANDB_CACHE_DIR`, `TMPDIR`, and `+output_dir`.
 - Dataset has zero samples: check that `training`, `validation`, and `test` contain `.mp4` files, and that every video has a matching `.npz` action/pose file.
 - W&B entity error: pass `wandb.entity=local` for offline tests or set your real W&B entity for online logging.

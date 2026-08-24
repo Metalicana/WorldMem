@@ -55,6 +55,56 @@ class ChunkTraceTest(unittest.TestCase):
         self.assertEqual(chunks[3]["samples"][0]["generated_frame"], 1)
         self.assertEqual(chunks[3]["samples"][0]["target_horizon"], 2)
 
+    def test_legacy_trace_uses_run_start_batch_idx(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy.jsonl"
+            rows = []
+            for batch_idx in (0, 1):
+                rows.append(
+                    {
+                        "event": "memory_run_start",
+                        "batch_idx": batch_idx,
+                        "context_frames": 600,
+                    }
+                )
+                for target in (600, 601):
+                    rows.append(
+                        {
+                            "event": "memory_retrieval",
+                            "batch_index": 0,
+                            "context_slot": 0,
+                            "target_frame": target,
+                            "target_horizon": 1,
+                        }
+                    )
+            path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            chunks = VALIDATE.load_chunk_samples([path])
+        self.assertEqual(sorted(chunks), [0, 1])
+        self.assertEqual(len(chunks[0]["samples"]), 2)
+        self.assertEqual(len(chunks[1]["samples"]), 2)
+
+    def test_oldest_trace_detects_target_resets_without_run_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oldest.jsonl"
+            rows = [
+                {
+                    "event": "memory_retrieval",
+                    "context_slot": 0,
+                    "target_frame": target,
+                    "target_horizon": 1,
+                }
+                for target in (600, 601, 600, 601)
+            ]
+            path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            chunks = VALIDATE.load_chunk_samples([path])
+        self.assertEqual(sorted(chunks), [0, 1])
+
 
 class GeometryMatchingTest(unittest.TestCase):
     def test_identity_pose_has_unit_similarity(self):

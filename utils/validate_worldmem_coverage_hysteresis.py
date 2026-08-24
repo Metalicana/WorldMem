@@ -46,6 +46,9 @@ def load_chunk_samples(trace_paths, default_context_frames=600):
     context_by_batch = {}
     chunks_by_batch = defaultdict(dict)
     for path in trace_paths:
+        active_legacy_batch = None
+        next_legacy_batch = 0
+        last_legacy_target = None
         with Path(path).open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if not line.strip():
@@ -55,21 +58,63 @@ def load_chunk_samples(trace_paths, default_context_frames=600):
                 except json.JSONDecodeError as exc:
                     print(f"[warn] malformed trace line {path}:{line_number}: {exc}")
                     continue
-                batch_idx = row.get("global_batch_idx")
-                if batch_idx is None:
-                    continue
-                batch_idx = int(batch_idx)
                 if row.get("event") == "memory_run_start":
+                    explicit_batch = row.get("global_batch_idx")
+                    if explicit_batch is None:
+                        explicit_batch = row.get("dataset_batch_idx")
+                    if explicit_batch is None:
+                        explicit_batch = row.get("batch_idx")
+                    if explicit_batch is None:
+                        explicit_batch = next_legacy_batch
+                    active_legacy_batch = int(explicit_batch)
+                    next_legacy_batch = max(
+                        next_legacy_batch, active_legacy_batch + 1
+                    )
+                    last_legacy_target = None
+                    batch_idx = active_legacy_batch
                     context_by_batch[batch_idx] = int(
                         row.get("context_frames", default_context_frames)
                     )
-                if (
-                    row.get("event") == "memory_retrieval"
-                    and int(row.get("context_slot", 0)) == 0
-                ):
-                    target = int(row["target_frame"])
-                    horizon = int(row.get("target_horizon", 1))
-                    chunks_by_batch[batch_idx][target] = horizon
+                    continue
+
+                if row.get("event") != "memory_retrieval":
+                    continue
+                if int(row.get("context_slot", 0)) != 0:
+                    continue
+
+                target = int(row["target_frame"])
+                explicit_batch = row.get("global_batch_idx")
+                if explicit_batch is None:
+                    explicit_batch = row.get("dataset_batch_idx")
+                if explicit_batch is not None:
+                    batch_idx = int(explicit_batch)
+                    active_legacy_batch = batch_idx
+                    next_legacy_batch = max(next_legacy_batch, batch_idx + 1)
+                else:
+                    if active_legacy_batch is None:
+                        active_legacy_batch = next_legacy_batch
+                        next_legacy_batch += 1
+                    elif (
+                        last_legacy_target is not None
+                        and target < last_legacy_target
+                    ):
+                        # Very old traces have neither run-start IDs nor
+                        # per-event global IDs. A target-frame reset marks the
+                        # next validation trajectory.
+                        active_legacy_batch = next_legacy_batch
+                        next_legacy_batch += 1
+                    batch_idx = active_legacy_batch
+
+                last_legacy_target = target
+                horizon = int(row.get("target_horizon", 1))
+                existing = chunks_by_batch[batch_idx].get(target)
+                if existing is not None and existing != horizon:
+                    raise RuntimeError(
+                        "Conflicting target horizons in trace "
+                        f"{path}: batch={batch_idx} target={target} "
+                        f"values={existing},{horizon}"
+                    )
+                chunks_by_batch[batch_idx][target] = horizon
 
     output = {}
     for batch_idx, chunks in chunks_by_batch.items():

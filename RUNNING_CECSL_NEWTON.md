@@ -2213,7 +2213,9 @@ WorldMem's configured generation `chunk_size` is one frame, not MemCam's
 `target_horizon` values from the run's access trace, samples the final frame of
 each traced chunk, requires a two-chunk gap, and considers generated frames only.
 The clean input context is not present in the saved prediction video and is
-therefore excluded automatically.
+therefore excluded automatically. Legacy traces without `global_batch_idx` are
+supported through `memory_run_start.batch_idx`; the oldest trace format falls
+back to detecting trajectory boundaries when target-frame numbering resets.
 
 Run on CECSL:
 

@@ -2216,6 +2216,13 @@ The clean input context is not present in the saved prediction video and is
 therefore excluded automatically. Legacy traces without `global_batch_idx` are
 supported through `memory_run_start.batch_idx`; the oldest trace format falls
 back to detecting trajectory boundaries when target-frame numbering resets.
+The original `worldmem_unbounded_60s_n30` rollout predates retrieval tracing. If
+a batch has no retrieval events, the validator instead reconstructs its chunks
+from the saved prediction length using the repository's explicit
+`configurations/algorithm/df_base.yaml` value, `chunk_size: 1`. This provenance
+is recorded as `worldmem_config_fallback` in `video_inventory.csv`; it is not a
+hardcoded MemCam stride. Set `FALLBACK_CHUNK_SIZE` only when validating a run
+known to have used a different WorldMem chunk size.
 
 Run on CECSL:
 
@@ -2252,7 +2259,8 @@ Outputs include:
 - `summary.csv` and `summary.json`: trajectory-balanced effects and 95% CIs;
 - `trajectory_summary.csv`: one row per trajectory, threshold, and time subset;
 - `pair_details.csv`: exact older/later frame identities and own-index GT scores;
-- `video_inventory.csv`: traced chunk counts and horizons;
+- `video_inventory.csv`: chunk counts, horizons, and whether indexing came from
+  the access trace or the explicit WorldMem configuration fallback;
 - `coverage_hysteresis_validation.png`: PSNR, SSIM, and match-count threshold curves.
 
 Positive `older - later` PSNR/SSIM supports hysteresis. Require the effect to be

@@ -686,7 +686,10 @@ persistent representative when a later generated frame already covers its view.
 Before implementing it, run
 `scripts/validate_worldmem_coverage_hysteresis.sh` on the existing unbounded
 60-second videos. The validator derives WorldMem's actual one-frame chunks from
-access traces, excludes the clean input context, sweeps geometric thresholds
+access traces when available. The original unbounded rollout predates retrieval
+tracing, so its fallback reconstructs chunks from the 600-frame saved prediction
+using the repository's configured `chunk_size: 1` and records this source in
+`video_inventory.csv`. It excludes the clean input context, sweeps geometric thresholds
 0.80/0.85/0.90/0.95, compares each older/later frame against its own exact-index
 GT using PSNR/SSIM, and bootstraps trajectory means. Runtime policy work remains
 blocked on a positive, threshold-robust result, including the final quarter.

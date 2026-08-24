@@ -34,9 +34,9 @@ def discover_trace_paths(run_dir, patterns=None):
         paths.extend(Path(path) for path in sorted(glob.glob(str(pattern))))
     paths = sorted(set(path.resolve() for path in paths))
     if not paths:
-        raise FileNotFoundError(
-            f"No access traces found for {run_dir}. Actual chunk indexing is "
-            "required; this validator will not assume MemCam's chunk stride."
+        print(
+            f"[warn] no access traces found for {run_dir}; batches will use "
+            "the explicit WorldMem chunk-size fallback"
         )
     return paths
 
@@ -143,6 +143,28 @@ def load_chunk_samples(trace_paths, default_context_frames=600):
             "samples": samples,
         }
     return output
+
+
+def config_chunk_samples(num_generated_frames, chunk_size):
+    """Build chunk samples when a pre-tracing rollout has no retrieval events."""
+    num_generated_frames = int(num_generated_frames)
+    chunk_size = int(chunk_size)
+    if num_generated_frames < 1:
+        raise ValueError("num_generated_frames must be positive")
+    if chunk_size < 1:
+        raise ValueError("fallback chunk_size must be positive")
+    samples = []
+    for chunk_index, start in enumerate(range(0, num_generated_frames, chunk_size)):
+        horizon = min(chunk_size, num_generated_frames - start)
+        samples.append(
+            {
+                "chunk_index": int(chunk_index),
+                "target_frame": None,
+                "target_horizon": int(horizon),
+                "generated_frame": int(start + horizon - 1),
+            }
+        )
+    return samples
 
 
 def worldmem_fov_similarity(
@@ -561,6 +583,15 @@ def main():
     parser.add_argument("--metric_batch_size", type=int, default=64)
     parser.add_argument("--bootstrap_samples", type=int, default=10000)
     parser.add_argument("--bootstrap_seed", type=int, default=17)
+    parser.add_argument(
+        "--fallback_chunk_size",
+        type=int,
+        default=1,
+        help=(
+            "WorldMem chunk size for legacy rollouts with no retrieval trace. "
+            "The released WorldMem evaluation config uses one."
+        ),
+    )
     args = parser.parse_args()
 
     thresholds = sorted(set(parse_float_csv(args.coverage_thresholds)))
@@ -577,26 +608,40 @@ def main():
     pair_rows = []
     video_rows = []
     for batch_idx, prediction_path in prediction_videos:
-        if batch_idx not in chunks:
-            raise RuntimeError(f"No chunk trace found for generated batch {batch_idx}")
-        samples = [
-            row
-            for row in chunks[batch_idx]["samples"]
-            if int(row["generated_frame"]) < expected_frames
-        ]
+        available_video_frames = min(video_frame_count(prediction_path), expected_frames)
+        if batch_idx in chunks and chunks[batch_idx]["samples"]:
+            chunk_source = "access_trace"
+            context_frames = chunks[batch_idx]["context_frames"]
+            samples = [
+                row
+                for row in chunks[batch_idx]["samples"]
+                if int(row["generated_frame"]) < available_video_frames
+            ]
+        else:
+            chunk_source = "worldmem_config_fallback"
+            context_frames = int(args.context_frames)
+            samples = config_chunk_samples(
+                available_video_frames,
+                args.fallback_chunk_size,
+            )
+            print(
+                f"[warn] batch={batch_idx:02d} has no chunk trace; using "
+                f"WorldMem fallback chunk_size={args.fallback_chunk_size} "
+                f"over {available_video_frames} saved frames"
+            )
         if not samples:
             raise RuntimeError(f"No generated chunks found for batch {batch_idx}")
         generated_indices = [row["generated_frame"] for row in samples]
-        if video_frame_count(prediction_path) <= max(generated_indices):
+        if available_video_frames <= max(generated_indices):
             raise RuntimeError(f"Prediction video is shorter than its trace: {prediction_path}")
         c2ws, dataset_video_path = load_pose_c2ws_for_batch(
             data_dir=args.data_dir,
             batch_idx=batch_idx,
             generated_frame_indices=generated_indices,
             seed=args.dataset_seed,
-            context_frames=chunks[batch_idx]["context_frames"],
+            context_frames=context_frames,
             initial_skip_frames=args.initial_skip_frames,
-            n_frames_valid=chunks[batch_idx]["context_frames"] + expected_frames,
+            n_frames_valid=context_frames + expected_frames,
         )
         # c2ws is ordered like generated_indices; the matcher indexes this
         # compact array, so remap sampled generated frame IDs to local rows.
@@ -639,7 +684,7 @@ def main():
             batch_idx=batch_idx,
             generated_frame_indices=needed,
             seed=args.dataset_seed,
-            context_frames=chunks[batch_idx]["context_frames"],
+            context_frames=context_frames,
             initial_skip_frames=args.initial_skip_frames,
         )
         missing = sorted(
@@ -677,6 +722,7 @@ def main():
                 "prediction_video": str(prediction_path),
                 "dataset_video": str(dataset_video_path),
                 "actual_chunks": len(samples),
+                "chunk_index_source": chunk_source,
                 "unique_chunk_horizons": ",".join(
                     str(value) for value in sorted({row["target_horizon"] for row in samples})
                 ),
@@ -690,6 +736,7 @@ def main():
         )
         print(
             f"[coverage] batch={batch_idx:02d} chunks={len(samples)} "
+            f"source={chunk_source} "
             + " ".join(
                 f"t{threshold:.2f}={sum(row['coverage_threshold'] == threshold for row in pairs)}"
                 for threshold in thresholds

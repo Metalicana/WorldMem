@@ -45,4 +45,5 @@ python utils/validate_worldmem_coverage_hysteresis.py \
   --device "${DEVICE:-cuda}" \
   --metric_batch_size "${METRIC_BATCH_SIZE:-64}" \
   --bootstrap_samples "${BOOTSTRAP_SAMPLES:-10000}" \
-  --bootstrap_seed "${BOOTSTRAP_SEED:-17}"
+  --bootstrap_seed "${BOOTSTRAP_SEED:-17}" \
+  --fallback_chunk_size "${FALLBACK_CHUNK_SIZE:-1}"

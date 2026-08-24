@@ -86,6 +86,16 @@ class ChunkTraceTest(unittest.TestCase):
         self.assertEqual(len(chunks[0]["samples"]), 2)
         self.assertEqual(len(chunks[1]["samples"]), 2)
 
+    def test_worldmem_config_fallback_samples_one_frame_chunks(self):
+        samples = VALIDATE.config_chunk_samples(600, chunk_size=1)
+        self.assertEqual(len(samples), 600)
+        self.assertEqual(samples[0]["generated_frame"], 0)
+        self.assertEqual(samples[-1]["generated_frame"], 599)
+        self.assertEqual(
+            {row["target_horizon"] for row in samples},
+            {1},
+        )
+
     def test_oldest_trace_detects_target_resets_without_run_start(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "oldest.jsonl"

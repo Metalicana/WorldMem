@@ -22,6 +22,9 @@ compute_marginal_coverage_eviction_scores = (
     POLICIES.compute_marginal_coverage_eviction_scores
 )
 compute_coverage_ri_fusion_scores = POLICIES.compute_coverage_ri_fusion_scores
+select_coverage_hysteresis_admissions = (
+    POLICIES.select_coverage_hysteresis_admissions
+)
 estimate_cluster_threshold = POLICIES.estimate_cluster_threshold
 connected_components_from_threshold = POLICIES.connected_components_from_threshold
 cosine_distances = POLICIES.cosine_distances
@@ -67,6 +70,46 @@ class FrameMemoryBufferTest(unittest.TestCase):
             buffer.update(range(30))
             retained.append(buffer.candidates())
         self.assertNotEqual(retained[0], retained[1])
+
+
+class CoverageHysteresisTest(unittest.TestCase):
+    def test_policy_requires_budget(self):
+        with self.assertRaises(ValueError):
+            FrameMemoryBuffer(policy="coverage_hysteresis")
+
+    def test_sequential_admission_checks_same_chunk_candidates(self):
+        c2ws = make_line_c2ws([0.0, 0.1, 20.0, 20.1])
+        admitted, details = select_coverage_hysteresis_admissions(
+            existing_frame_indices=[0],
+            candidate_frame_indices=[1, 2, 3],
+            c2ws=c2ws,
+            view_similarity_threshold=0.90,
+            return_details=True,
+        )
+        self.assertEqual(admitted, [2])
+        self.assertEqual(details[1]["hysteresis_reason"], "covered_by_incumbent")
+        self.assertEqual(details[2]["hysteresis_reason"], "novel_view")
+        self.assertEqual(details[3]["hysteresis_nearest_reference_frame"], 2)
+        self.assertEqual(details[3]["hysteresis_reference_count"], 2)
+
+    def test_threshold_equality_rejects_candidate(self):
+        c2ws = make_line_c2ws([0.0, 6.0])
+        admitted = select_coverage_hysteresis_admissions(
+            existing_frame_indices=[0],
+            candidate_frame_indices=[1],
+            c2ws=c2ws,
+            view_similarity_threshold=0.90,
+        )
+        self.assertEqual(admitted, [])
+
+    def test_equal_utility_preserves_older_incumbents(self):
+        buffer = FrameMemoryBuffer(policy="coverage_hysteresis", budget=2)
+        evicted = buffer.update(
+            [0, 1, 2],
+            eviction_scores={0: 1.0, 1: 1.0, 2: 1.0},
+        )
+        self.assertEqual(evicted, [2])
+        self.assertEqual(buffer.candidates(), [0, 1])
 
 
 class RarityIrreplaceabilityTest(unittest.TestCase):

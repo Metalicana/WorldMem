@@ -51,6 +51,10 @@ MCE_ALPHA="${MCE_ALPHA:-0.65}"
 MCE_RARITY_NEIGHBORS="${MCE_RARITY_NEIGHBORS:-3}"
 RI_RARITY_NEIGHBORS="${RI_RARITY_NEIGHBORS:-3}"
 COVERAGE_RI_COVERAGE_WEIGHT="${COVERAGE_RI_COVERAGE_WEIGHT:-0.75}"
+HYSTERESIS_VIEW_THRESHOLD="${HYSTERESIS_VIEW_THRESHOLD:-0.90}"
+HYSTERESIS_FOV_RADIUS="${HYSTERESIS_FOV_RADIUS:-30}"
+HYSTERESIS_FOV_HALF_H="${HYSTERESIS_FOV_HALF_H:-52.5}"
+HYSTERESIS_FOV_HALF_V="${HYSTERESIS_FOV_HALF_V:-37.5}"
 if [ "$MEMORY_POLICY" = "causal_consistency_coverage_ri" ]; then
   CAUSAL_GATE_MODE="${CAUSAL_GATE_MODE:-enforce}"
 else
@@ -88,7 +92,7 @@ RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGE
 OUTPUT_DIR="${OUTPUT_DIR:-$STORAGE_ROOT/outputs/memory_policy/$RUN_NAME}"
 TRACE_PATH="${TRACE_PATH:-$OUTPUT_DIR/access_traces/$RUN_NAME.jsonl}"
 
-if { [ "$MEMORY_POLICY" = "random_cap" ] || [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ] || [ "$MEMORY_POLICY" = "mce" ] || [ "$MEMORY_POLICY" = "causal_consistency_coverage_ri" ]; } && [ -z "$MEMORY_BUDGET" ]; then
+if { [ "$MEMORY_POLICY" = "random_cap" ] || [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ] || [ "$MEMORY_POLICY" = "mce" ] || [ "$MEMORY_POLICY" = "causal_consistency_coverage_ri" ] || [ "$MEMORY_POLICY" = "coverage_hysteresis" ]; } && [ -z "$MEMORY_BUDGET" ]; then
   echo "MEMORY_BUDGET is required when MEMORY_POLICY=$MEMORY_POLICY" >&2
   exit 2
 fi
@@ -254,6 +258,10 @@ cmd=(
   +algorithm.mce_rarity_neighbors="$MCE_RARITY_NEIGHBORS"
   +algorithm.ri_rarity_neighbors="$RI_RARITY_NEIGHBORS"
   +algorithm.coverage_ri_coverage_weight="$COVERAGE_RI_COVERAGE_WEIGHT"
+  +algorithm.hysteresis_view_threshold="$HYSTERESIS_VIEW_THRESHOLD"
+  +algorithm.hysteresis_fov_radius="$HYSTERESIS_FOV_RADIUS"
+  +algorithm.hysteresis_fov_half_h="$HYSTERESIS_FOV_HALF_H"
+  +algorithm.hysteresis_fov_half_v="$HYSTERESIS_FOV_HALF_V"
   +algorithm.causal_gate_mode="$CAUSAL_GATE_MODE"
   +algorithm.causal_gate_require_approved="$CAUSAL_GATE_REQUIRE_APPROVED"
   +algorithm.retrieval_fov_radius="$RETRIEVAL_FOV_RADIUS"
@@ -288,6 +296,12 @@ echo "Memory budget: ${MEMORY_BUDGET:-none}"
 echo "Memory bank device: $MEMORY_BANK_DEVICE"
 echo "Memory reference source: $MEMORY_REFERENCE_SOURCE"
 echo "Memory feature backend: $MEMORY_FEATURE_BACKEND"
+if [ "$MEMORY_POLICY" = "coverage_hysteresis" ]; then
+  echo "Hysteresis view threshold: $HYSTERESIS_VIEW_THRESHOLD"
+  echo "Hysteresis geometry: radius=$HYSTERESIS_FOV_RADIUS half_h=$HYSTERESIS_FOV_HALF_H half_v=$HYSTERESIS_FOV_HALF_V"
+  echo "Retention weights: coverage=$COVERAGE_RI_COVERAGE_WEIGHT ri=$(awk "BEGIN { print 1.0 - $COVERAGE_RI_COVERAGE_WEIGHT }")"
+  echo "RI rarity neighbors: $RI_RARITY_NEIGHBORS"
+fi
 echo "Memory feature device: $MEMORY_FEATURE_DEVICE"
 echo "Dataset seed: $DATASET_SEED"
 echo "Global seed: $GLOBAL_SEED"

@@ -2272,6 +2272,72 @@ implement or tune the runtime policy from whichever single threshold looks best.
 On Newton, use `WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results`; the wrapper then
 places all inputs and outputs below that root and never uses `/data/ab575577`.
 
+### Coverage-Hysteresis Runtime Policy
+
+The 30-trajectory validation supports implementing the MemCam policy in
+WorldMem. Across thresholds 0.80/0.85/0.90/0.95, trajectory-bootstrap 95% CIs
+for older-minus-later PSNR and SSIM were entirely positive. At the prespecified
+primary threshold 0.90, the mean advantage was +0.847 dB PSNR and +0.047 SSIM
+over the full video, increasing to +1.207 dB and +0.065 over 45-60 seconds.
+Median earlier/later gaps were 43 frames overall and 77 frames late, so the
+effect is not an adjacent-frame artifact.
+
+The runtime policy is `coverage_hysteresis`:
+
+1. Process generated candidates causally.
+2. Reject a candidate from persistent memory when its maximum camera-only view
+   affinity to an incumbent is at least `HYSTERESIS_VIEW_THRESHOLD`.
+3. Immediately add admitted candidates to the reference set for the rest of
+   the same generation chunk.
+4. If the admitted pool exceeds budget, retain by independently normalized
+   `0.75 * WorldMem SLAM coverage + 0.25 * latent RI`.
+5. On equal retention utility, evict the newer rewrite and preserve the older
+   incumbent.
+
+WorldMem's native recent sliding context is unchanged. A rejected candidate can
+still condition the ordinary autoregressive window; it is only denied promotion
+into persistent external memory. Admission uses camera geometry only. Retention
+uses WorldMem's pooled latent descriptor and requires no DINO model, decoded RGB,
+GT, or learned quality estimator.
+
+Run the matched B32 60-second, 15-video experiment on CECSL GPU 0:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+MEMORY_POLICY=coverage_hysteresis \
+MEMORY_BUDGET=32 \
+MEMORY_BANK_DEVICE=cpu \
+MEMORY_REFERENCE_SOURCE=predicted \
+MEMORY_FEATURE_BACKEND=latent \
+HYSTERESIS_VIEW_THRESHOLD=0.90 \
+HYSTERESIS_FOV_RADIUS=30 \
+HYSTERESIS_FOV_HALF_H=52.5 \
+HYSTERESIS_FOV_HALF_V=37.5 \
+COVERAGE_RI_COVERAGE_WEIGHT=0.75 \
+RI_RARITY_NEIGHBORS=3 \
+FUTURE_SECONDS=60 \
+LIMIT_BATCH=15 \
+GLOBAL_SEED=42 \
+DATASET_SEED=42 \
+RUN_NAME=worldmem_coverage_hysteresis_b32_t0p90_g75_ri25_k3_60s_n15 \
+bash scripts/run_worldmem_memory_policy_smoke.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/coverage_hysteresis_b32_gpu0_$(date +%F_%H%M).log
+```
+
+The runner writes each completed batch video immediately and resumes from the
+contiguous completed batch count after interruption. Admission and update events
+are recorded in the run's `access_traces` JSONL.
+
+On Newton, set `WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results`, create
+`$HOME/worldmem_results/logs`, and point `tee` there. Do not use the CECSL
+`/data/ab575577` path on Newton.
+
 ### Open Runs
 
 1. Run the radius-50 controlled probe. This is the most direct remaining test of

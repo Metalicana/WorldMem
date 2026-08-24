@@ -32,6 +32,7 @@ from .memory_policies import (
     pairwise_mean_abs_distances,
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
+    select_coverage_hysteresis_admissions,
 )
 from .causal_memory_gate import (
     causal_consistency_score,
@@ -530,6 +531,22 @@ class WorldMemMinecraft(DiffusionForcingBase):
         )
         if not 0.0 <= self.coverage_ri_coverage_weight <= 1.0:
             raise ValueError("coverage_ri_coverage_weight must be in [0, 1]")
+        self.hysteresis_view_threshold = float(
+            getattr(cfg, "hysteresis_view_threshold", 0.90)
+        )
+        if not 0.0 <= self.hysteresis_view_threshold <= 1.0:
+            raise ValueError("hysteresis_view_threshold must be in [0, 1]")
+        self.hysteresis_fov_radius = float(
+            getattr(cfg, "hysteresis_fov_radius", 30.0)
+        )
+        self.hysteresis_fov_half_h = float(
+            getattr(cfg, "hysteresis_fov_half_h", 52.5)
+        )
+        self.hysteresis_fov_half_v = float(
+            getattr(cfg, "hysteresis_fov_half_v", 37.5)
+        )
+        if self.hysteresis_fov_radius <= 0:
+            raise ValueError("hysteresis_fov_radius must be positive")
         default_gate_mode = (
             "enforce"
             if self.memory_policy == "causal_consistency_coverage_ri"
@@ -1197,6 +1214,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "kcenter_coreset",
             "mce",
             "causal_consistency_coverage_ri",
+            "coverage_hysteresis",
         }:
             return {0}
         return set()
@@ -1611,7 +1629,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 return_details=True,
             )
 
-        if self.memory_policy == "causal_consistency_coverage_ri":
+        if self.memory_policy in {
+            "causal_consistency_coverage_ri",
+            "coverage_hysteresis",
+        }:
             c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
             return compute_coverage_ri_fusion_scores(
                 memory_frame_indices=frame_indices,
@@ -1636,7 +1657,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
         initial_frames = list(range(n_context_frames))
         protected_frames = (
             set()
-            if self.memory_policy == "causal_consistency_coverage_ri"
+            if self.memory_policy in {
+                "causal_consistency_coverage_ri",
+                "coverage_hysteresis",
+            }
             else {max(n_context_frames - 1, 0)}
         )
         for batch_index in range(batch_size):
@@ -1972,7 +1996,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
         new_frames = list(range(curr_frame, curr_frame + horizon))
         protected_frames = (
             set()
-            if self.memory_policy == "causal_consistency_coverage_ri"
+            if self.memory_policy in {
+                "causal_consistency_coverage_ri",
+                "coverage_hysteresis",
+            }
             else {curr_frame + horizon - 1}
         )
         for batch_index, buffer in enumerate(memory_buffers):
@@ -1984,12 +2011,30 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 gt_latents=gt_latents,
                 frame_idx=frame_idx,
             )
-            admitted_frames = [
-                frame
-                for frame in new_frames
-                if gate_decisions.get(frame, {}).get("causal_gate_admitted", True)
-            ]
             current_memory = buffer.candidates()
+            hysteresis_details = {}
+            if self.memory_policy == "coverage_hysteresis":
+                c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
+                admitted_frames, hysteresis_details = (
+                    select_coverage_hysteresis_admissions(
+                        existing_frame_indices=current_memory,
+                        candidate_frame_indices=new_frames,
+                        c2ws=c2ws,
+                        view_similarity_threshold=self.hysteresis_view_threshold,
+                        fov_half_h=self.hysteresis_fov_half_h,
+                        fov_half_v=self.hysteresis_fov_half_v,
+                        radius=self.hysteresis_fov_radius,
+                        return_details=True,
+                    )
+                )
+            else:
+                admitted_frames = [
+                    frame
+                    for frame in new_frames
+                    if gate_decisions.get(frame, {}).get(
+                        "causal_gate_admitted", True
+                    )
+                ]
             prospective_memory = current_memory + [
                 frame_idx
                 for frame_idx in admitted_frames
@@ -2027,6 +2072,47 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 )
                 event["stored_memory_size_after_update"] = len(buffer)
                 self._write_access_trace(event)
+            if self.memory_policy == "coverage_hysteresis":
+                retained = set(buffer.candidates())
+                for target_frame, detail in hysteresis_details.items():
+                    self._write_access_trace(
+                        {
+                            "event": "coverage_hysteresis_admission",
+                            "phase": "generation",
+                            "batch_index": int(batch_index),
+                            "target_frame": int(target_frame),
+                            "hysteresis_retained_after_update": bool(
+                                target_frame in retained
+                            ),
+                            "stored_memory_size_after_update": len(buffer),
+                            **detail,
+                        }
+                    )
+                self._write_access_trace(
+                    {
+                        "event": "coverage_hysteresis_update",
+                        "phase": "generation",
+                        "batch_index": int(batch_index),
+                        "target_frame": int(curr_frame),
+                        "target_horizon": int(horizon),
+                        "stored_memory_size": len(buffer),
+                        "admission_candidate_count": len(hysteresis_details),
+                        "admitted_count": len(admitted_frames),
+                        "rejected_covered_count": sum(
+                            not row["hysteresis_admitted"]
+                            for row in hysteresis_details.values()
+                        ),
+                        "hysteresis_view_threshold": (
+                            self.hysteresis_view_threshold
+                        ),
+                        "hysteresis_fov_radius": self.hysteresis_fov_radius,
+                        "hysteresis_fov_half_h": self.hysteresis_fov_half_h,
+                        "hysteresis_fov_half_v": self.hysteresis_fov_half_v,
+                        "coverage_weight": self.coverage_ri_coverage_weight,
+                        "ri_weight": 1.0 - self.coverage_ri_coverage_weight,
+                        "rarity_neighbors": self.ri_rarity_neighbors,
+                    }
+                )
         self._prune_memory_feature_caches(memory_buffers)
 
     def _generate_condition_indices(
@@ -2659,6 +2745,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "gt_memory_replay_expected_indices": self.gt_memory_replay_expected_indices,
                 "gt_memory_replay_compute_dino": self.gt_memory_replay_compute_dino,
                 "coverage_ri_coverage_weight": self.coverage_ri_coverage_weight,
+                "hysteresis_view_threshold": self.hysteresis_view_threshold,
+                "hysteresis_fov_radius": self.hysteresis_fov_radius,
+                "hysteresis_fov_half_h": self.hysteresis_fov_half_h,
+                "hysteresis_fov_half_v": self.hysteresis_fov_half_v,
                 "causal_gate_mode": self.causal_gate_mode,
                 "causal_gate_calibration_path": self.causal_gate_calibration_path,
                 "causal_gate_require_approved": self.causal_gate_require_approved,

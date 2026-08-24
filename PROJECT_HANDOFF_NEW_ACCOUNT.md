@@ -691,8 +691,24 @@ tracing, so its fallback reconstructs chunks from the 600-frame saved prediction
 using the repository's configured `chunk_size: 1` and records this source in
 `video_inventory.csv`. It excludes the clean input context, sweeps geometric thresholds
 0.80/0.85/0.90/0.95, compares each older/later frame against its own exact-index
-GT using PSNR/SSIM, and bootstraps trajectory means. Runtime policy work remains
-blocked on a positive, threshold-robust result, including the final quarter.
+GT using PSNR/SSIM, and bootstraps trajectory means. Runtime policy work was
+gated on a positive, threshold-robust result, including the final quarter.
+
+That validation is now complete and positive on all 30 trajectories as a
+population-level result. Every threshold in 0.80/0.85/0.90/0.95 had positive
+trajectory-bootstrap PSNR/SSIM confidence intervals, including 45-60 seconds.
+At the primary threshold 0.90, older representatives were better by +0.847 dB
+PSNR/+0.047 SSIM overall and +1.207 dB/+0.065 SSIM late, with median temporal
+gaps of 43 and 77 frames respectively. The effect is heterogeneous rather than
+universal across trajectories.
+
+WorldMem now implements `coverage_hysteresis`, following MemCam: camera-only
+sequential admission at threshold 0.90, same-chunk admitted candidates becoming
+immediate references, normalized 0.75 SLAM-coverage/0.25 latent-RI retention,
+and older-incumbent tie preservation. WorldMem does not need MemCam's transient
+endpoint bank slot because its native recent sliding window remains unchanged.
+The primary CECSL B32/60s/n15 command is documented in
+`RUNNING_CECSL_NEWTON.md`.
 
 ## Common Operational Lessons
 

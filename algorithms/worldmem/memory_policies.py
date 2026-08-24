@@ -13,6 +13,7 @@ SUPPORTED_MEMORY_POLICIES = (
     "kcenter_coreset",
     "mce",
     "causal_consistency_coverage_ri",
+    "coverage_hysteresis",
 )
 BUDGETED_MEMORY_POLICIES = (
     "random_cap",
@@ -22,6 +23,7 @@ BUDGETED_MEMORY_POLICIES = (
     "kcenter_coreset",
     "mce",
     "causal_consistency_coverage_ri",
+    "coverage_hysteresis",
 )
 
 
@@ -118,7 +120,11 @@ class FrameMemoryBuffer:
                     evictable,
                     key=lambda idx: (
                         self._stats[idx].get("score", 0.0),
-                        self._stats[idx]["insert_order"],
+                        (
+                            -self._stats[idx]["insert_order"]
+                            if self.policy == "coverage_hysteresis"
+                            else self._stats[idx]["insert_order"]
+                        ),
                     ),
                 )
 
@@ -173,6 +179,135 @@ def pose_distances(c2ws, frame_indices, target_indices, rotation_weight=2.0):
             rotation_dists[row, col] = rotation_distance(rotation_a, rotation_b)
 
     return position_dists + rotation_weight * rotation_dists
+
+
+def camera_trajectory_similarity(
+    c2ws,
+    query_frame_indices,
+    memory_frame_indices,
+    fov_half_h=52.5,
+    fov_half_v=37.5,
+    radius=30.0,
+):
+    """Camera-only view affinity using WorldMem's +z-forward convention."""
+    query_frame_indices = list(query_frame_indices)
+    memory_frame_indices = list(memory_frame_indices)
+    if not query_frame_indices or not memory_frame_indices:
+        return np.zeros(
+            (len(query_frame_indices), len(memory_frame_indices)),
+            dtype=np.float64,
+        )
+    if radius <= 0:
+        raise ValueError("radius must be positive")
+
+    query = c2ws[query_frame_indices]
+    memory = c2ws[memory_frame_indices]
+    position_distance = np.linalg.norm(
+        query[:, None, :3, 3] - memory[None, :, :3, 3],
+        axis=-1,
+    )
+    position_similarity = np.clip(
+        1.0 - position_distance / (2.0 * float(radius)),
+        0.0,
+        1.0,
+    )
+
+    query_forward = query[:, :3, 2]
+    memory_forward = memory[:, :3, 2]
+    query_yaw = np.arctan2(query_forward[:, 0], query_forward[:, 2])
+    memory_yaw = np.arctan2(memory_forward[:, 0], memory_forward[:, 2])
+    yaw_distance = np.abs(query_yaw[:, None] - memory_yaw[None, :])
+    yaw_distance = np.minimum(yaw_distance, 2.0 * np.pi - yaw_distance)
+
+    query_pitch = np.arctan2(
+        query_forward[:, 1],
+        np.linalg.norm(query_forward[:, [0, 2]], axis=1),
+    )
+    memory_pitch = np.arctan2(
+        memory_forward[:, 1],
+        np.linalg.norm(memory_forward[:, [0, 2]], axis=1),
+    )
+    pitch_distance = np.abs(query_pitch[:, None] - memory_pitch[None, :])
+
+    horizontal_similarity = np.clip(
+        1.0 - yaw_distance / (2.0 * np.deg2rad(float(fov_half_h))),
+        0.0,
+        1.0,
+    )
+    vertical_similarity = np.clip(
+        1.0 - pitch_distance / (2.0 * np.deg2rad(float(fov_half_v))),
+        0.0,
+        1.0,
+    )
+    return position_similarity * horizontal_similarity * vertical_similarity
+
+
+def select_coverage_hysteresis_admissions(
+    existing_frame_indices,
+    candidate_frame_indices,
+    c2ws,
+    view_similarity_threshold=0.90,
+    fov_half_h=52.5,
+    fov_half_v=37.5,
+    radius=30.0,
+    return_details=False,
+):
+    """Admit only candidates that add a view absent from persistent memory."""
+    existing = list(dict.fromkeys(int(idx) for idx in existing_frame_indices))
+    candidates = list(dict.fromkeys(int(idx) for idx in candidate_frame_indices))
+    threshold = float(view_similarity_threshold)
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("view_similarity_threshold must be in [0, 1]")
+
+    references = list(existing)
+    reference_set = set(references)
+    admitted = []
+    details = {}
+    for frame_idx in candidates:
+        if frame_idx in reference_set:
+            details[frame_idx] = {
+                "hysteresis_admitted": False,
+                "hysteresis_reason": "already_stored",
+                "hysteresis_max_view_similarity": 1.0,
+                "hysteresis_nearest_reference_frame": int(frame_idx),
+                "hysteresis_reference_count": len(references),
+                "hysteresis_view_threshold": threshold,
+            }
+            continue
+
+        if references:
+            similarities = camera_trajectory_similarity(
+                c2ws=c2ws,
+                query_frame_indices=[frame_idx],
+                memory_frame_indices=references,
+                fov_half_h=fov_half_h,
+                fov_half_v=fov_half_v,
+                radius=radius,
+            )[0]
+            nearest_position = int(np.argmax(similarities))
+            max_similarity = float(similarities[nearest_position])
+            nearest_reference = int(references[nearest_position])
+        else:
+            max_similarity = 0.0
+            nearest_reference = None
+
+        should_admit = max_similarity < threshold
+        details[frame_idx] = {
+            "hysteresis_admitted": bool(should_admit),
+            "hysteresis_reason": (
+                "novel_view" if should_admit else "covered_by_incumbent"
+            ),
+            "hysteresis_max_view_similarity": max_similarity,
+            "hysteresis_nearest_reference_frame": nearest_reference,
+            "hysteresis_reference_count": len(references),
+            "hysteresis_view_threshold": threshold,
+        }
+        if should_admit:
+            admitted.append(frame_idx)
+            references.append(frame_idx)
+            reference_set.add(frame_idx)
+
+    return (admitted, details) if return_details else admitted
 
 
 def cosine_distances(features):
@@ -486,7 +621,7 @@ def compute_coverage_ri_fusion_scores(
     """Fuse independently normalized geometric-coverage and RI utilities.
 
     The admission decision is intentionally not part of this function. It scores
-    only candidates that have already passed the causal-consistency gate.
+    only candidates admitted by the active policy before retention.
     """
     memory_frame_indices = list(memory_frame_indices)
     pinned_frames = set(pinned_frames or [])

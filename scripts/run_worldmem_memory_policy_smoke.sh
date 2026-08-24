@@ -50,6 +50,14 @@ KCENTER_TIME_WEIGHT="${KCENTER_TIME_WEIGHT:-0.0}"
 MCE_ALPHA="${MCE_ALPHA:-0.65}"
 MCE_RARITY_NEIGHBORS="${MCE_RARITY_NEIGHBORS:-3}"
 RI_RARITY_NEIGHBORS="${RI_RARITY_NEIGHBORS:-3}"
+COVERAGE_RI_COVERAGE_WEIGHT="${COVERAGE_RI_COVERAGE_WEIGHT:-0.75}"
+if [ "$MEMORY_POLICY" = "causal_consistency_coverage_ri" ]; then
+  CAUSAL_GATE_MODE="${CAUSAL_GATE_MODE:-enforce}"
+else
+  CAUSAL_GATE_MODE="${CAUSAL_GATE_MODE:-off}"
+fi
+CAUSAL_GATE_CALIBRATION_PATH="${CAUSAL_GATE_CALIBRATION_PATH:-}"
+CAUSAL_GATE_REQUIRE_APPROVED="${CAUSAL_GATE_REQUIRE_APPROVED:-true}"
 # Retrieval's own FOV-overlap test, applies regardless of memory_policy --
 # defaults reproduce the old hardcoded values exactly, only matters if set.
 RETRIEVAL_FOV_RADIUS="${RETRIEVAL_FOV_RADIUS:-30}"
@@ -80,7 +88,7 @@ RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGE
 OUTPUT_DIR="${OUTPUT_DIR:-$STORAGE_ROOT/outputs/memory_policy/$RUN_NAME}"
 TRACE_PATH="${TRACE_PATH:-$OUTPUT_DIR/access_traces/$RUN_NAME.jsonl}"
 
-if { [ "$MEMORY_POLICY" = "random_cap" ] || [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ] || [ "$MEMORY_POLICY" = "mce" ]; } && [ -z "$MEMORY_BUDGET" ]; then
+if { [ "$MEMORY_POLICY" = "random_cap" ] || [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ] || [ "$MEMORY_POLICY" = "mce" ] || [ "$MEMORY_POLICY" = "causal_consistency_coverage_ri" ]; } && [ -z "$MEMORY_BUDGET" ]; then
   echo "MEMORY_BUDGET is required when MEMORY_POLICY=$MEMORY_POLICY" >&2
   exit 2
 fi
@@ -245,6 +253,9 @@ cmd=(
   +algorithm.mce_alpha="$MCE_ALPHA"
   +algorithm.mce_rarity_neighbors="$MCE_RARITY_NEIGHBORS"
   +algorithm.ri_rarity_neighbors="$RI_RARITY_NEIGHBORS"
+  +algorithm.coverage_ri_coverage_weight="$COVERAGE_RI_COVERAGE_WEIGHT"
+  +algorithm.causal_gate_mode="$CAUSAL_GATE_MODE"
+  +algorithm.causal_gate_require_approved="$CAUSAL_GATE_REQUIRE_APPROVED"
   +algorithm.retrieval_fov_radius="$RETRIEVAL_FOV_RADIUS"
   +algorithm.retrieval_fov_samples="$RETRIEVAL_FOV_SAMPLES"
   +algorithm.retrieval_fov_half_h="$RETRIEVAL_FOV_HALF_H"
@@ -260,6 +271,9 @@ if [ -n "$MEMORY_BUDGET" ]; then
 fi
 if [ -n "$RETRIEVAL_CANDIDATE_CAP" ]; then
   cmd+=(+algorithm.retrieval_candidate_cap="$RETRIEVAL_CANDIDATE_CAP")
+fi
+if [ -n "$CAUSAL_GATE_CALIBRATION_PATH" ]; then
+  cmd+=(+algorithm.causal_gate_calibration_path="$CAUSAL_GATE_CALIBRATION_PATH")
 fi
 if [ -n "$GT_MEMORY_REPLAY_TARGET_FRAME" ]; then
   cmd+=(+algorithm.gt_memory_replay_target_frame="$GT_MEMORY_REPLAY_TARGET_FRAME")
@@ -290,6 +304,10 @@ echo "K-center archive stride: $KCENTER_ARCHIVE_STRIDE"
 echo "K-center visual weight: $KCENTER_VISUAL_WEIGHT"
 echo "K-center pose weight: $KCENTER_POSE_WEIGHT"
 echo "K-center time weight: $KCENTER_TIME_WEIGHT"
+echo "Coverage-RI coverage weight: $COVERAGE_RI_COVERAGE_WEIGHT"
+echo "Causal gate mode: $CAUSAL_GATE_MODE"
+echo "Causal gate calibration: ${CAUSAL_GATE_CALIBRATION_PATH:-none}"
+echo "Causal gate requires approved calibration: $CAUSAL_GATE_REQUIRE_APPROVED"
 echo "Future seconds: ${FUTURE_SECONDS:-derived-from-N_FRAMES_VALID}"
 echo "Context frames: $CONTEXT_FRAMES"
 echo "N frames valid: $N_FRAMES_VALID"

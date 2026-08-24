@@ -2,6 +2,9 @@
 
 This repository is being inspected from a sandbox where the codebase is not being run. Treat the commands below as target-machine instructions for the CECSL PC or the Newton cluster.
 
+For a compact project/account handoff, read `PROJECT_HANDOFF_NEW_ACCOUNT.md`
+before using this detailed runbook.
+
 ## Machine Notes
 
 - CECSL PC has the large local data area at `/data/ab575577/`. Keep datasets, model caches, W&B files, checkpoints, and large outputs there.
@@ -2037,6 +2040,227 @@ cleaner. The generated-only comparison shows that the first pathway cannot by
 itself explain the result. However, this is still one matched trajectory and is
 observational. Do not claim causality until the fixed-history GT memory-cleaning
 replay improves the next chunk and the result repeats across the 15-video run.
+
+The corresponding one-event fixed-history GT memory-cleaning replay passed every
+validity check. Replacing only the eight selected generated memory latents with
+VAE-encoded GT latents at the same frame identities changed immediate next-chunk
+quality by:
+
+| Metric | GT-cleaned minus control | Improvement direction |
+| --- | ---: | --- |
+| PSNR | +2.727 dB | positive |
+| SSIM | +0.0479 | positive |
+| LPIPS | -0.273 | negative |
+
+This is causal evidence for memory-mediated error propagation at the selected
+event: retrieval identities, prior generated history, conditions, noise, and RNG
+were held fixed, and only retrieved memory content changed. It is not yet an
+estimate of the average effect. The reported one-event confidence interval is
+degenerate and must not be presented as inferential uncertainty. Repeat across
+approximately four late events from distinct trajectories after the 15-video
+observational run.
+
+### Retrieved-Memory Quality: 15-Trajectory Result
+
+The full matched run completed with 15 trajectories per policy. In the late
+45-60 second window, paired trajectory bootstrap differences relative to
+unbounded were:
+
+| Policy | Retrieved PSNR delta | Retrieved SSIM delta | Retrieved LPIPS delta | Following PSNR delta | Following SSIM delta | Following LPIPS delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| RI b32 | +4.464 `[0.477, 9.189]` | +0.115 `[0.033, 0.212]` | -0.250 `[-0.384, -0.135]` | +6.777 `[2.360, 12.288]` | +0.150 `[0.060, 0.260]` | -0.270 `[-0.417, -0.138]` |
+| SLAM b16 | +9.980 `[6.560, 13.782]` | +0.217 `[0.122, 0.317]` | -0.416 `[-0.543, -0.287]` | +5.413 `[2.977, 8.223]` | +0.184 `[0.083, 0.294]` | -0.331 `[-0.476, -0.201]` |
+| FIFO b128 | -1.177 `[-3.336, 0.828]` | -0.082 `[-0.174, -0.005]` | +0.046 `[-0.060, 0.155]` | -0.481 `[-2.628, 1.547]` | -0.069 `[-0.162, 0.010]` | +0.019 `[-0.087, 0.127]` |
+
+Positive PSNR/SSIM and negative LPIPS favor the bounded policy. RI and SLAM
+therefore retrieve cleaner memories and produce better immediate outputs on the
+same trajectories; every late-window RI/SLAM confidence interval excludes zero.
+FIFO does not show the effect, which is the required negative control against a
+generic "any bounded bank helps" explanation.
+
+Restricting retrieved-memory metrics to generated references only gives:
+
+| Policy | Generated-reference fraction | Generated-only PSNR | Generated-only SSIM | Generated-only LPIPS | Worst-decile LPIPS | Following LPIPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SLAM b16 | 0.875 | **22.928** | **0.611** | **0.175** | **0.521** | **0.273** |
+| RI b32 | 0.864 | 16.615 | 0.491 | 0.369 | 0.771 | 0.335 |
+| Unbounded | 0.977 | 13.255 | 0.399 | 0.587 | 0.949 | 0.604 |
+| FIFO b128 | 1.000 | 12.453 | 0.324 | 0.621 | 0.977 | 0.623 |
+
+SLAM does retrieve generated history less often than unbounded, but its generated
+references remain better by 9.673 dB PSNR, 0.212 SSIM, and 0.412 LPIPS. RI has a
+slightly lower generated-reference fraction than SLAM yet retrieves worse
+generated content than SLAM. Exposure to generated history is therefore one
+pathway, but selective quality within generated history is independently visible
+and better explains the policy ordering.
+
+Raw retrieved-quality versus following-quality correlations are high, including
+late LPIPS Pearson correlations of 0.951 for RI, 0.668 for SLAM, and 0.987 for
+unbounded. Each run has 9,000 one-frame autoregressive generation steps
+(`600 frames x 15 trajectories`), but these are clustered and temporally
+autocorrelated within only 15 independent trajectories. Treat the correlations as
+descriptive evidence, not 9,000 independent observations or a causal estimate.
+
+The four replay events selected from distinct unbounded trajectories are batches
+0, 12, 7, and 14 at generated horizons 45.4, 55.4, 59.7, and 59.6 seconds. Their
+mean retrieved-generated LPIPS values are 1.003, 0.991, 0.941, and 0.915. Run the
+fixed-history replay on all four before making a replicated causal claim.
+
+### Causal-Consistency Coverage-RI Policy
+
+**Superseded experiment: do not use for reported runs.** MemCam's generic
+no-reference quality estimators and pose-calibrated DINO admission score both
+failed held-out validation. The WorldMem implementation below is retained only
+to reproduce that rejected mechanism if needed; it is not the current policy.
+
+This policy deliberately separates admission from retention. A newly generated
+frame is first accepted only when its pooled-latent similarity to the frames
+that actually conditioned it is not unexpectedly low for their camera-pose
+distance. The admitted pool is then reduced to budget 32 using:
+
+```text
+0.75 * normalized geometric coverage + 0.25 * normalized RI
+```
+
+This is not MemCam's older `reliable_slam_ri` heuristic. Ground truth is used
+only to calibrate and validate the admission score in a shadow run. The enforced
+policy reads only generated latents, selected parent IDs, overlap weights, and
+camera poses.
+
+Run the 15-video shadow calibration set on CECSL GPU 1:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+MEMORY_POLICY=causal_consistency_coverage_ri \
+MEMORY_BUDGET=32 \
+CAUSAL_GATE_MODE=shadow \
+COVERAGE_RI_COVERAGE_WEIGHT=0.75 \
+MEMORY_FEATURE_BACKEND=latent \
+FUTURE_SECONDS=60 \
+LIMIT_BATCH=15 \
+GLOBAL_SEED=101 \
+DATASET_SEED=42 \
+RUN_NAME=worldmem_causal_gate_shadow_b32_60s_n15 \
+bash scripts/run_worldmem_memory_policy_smoke.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/causal_gate_shadow_b32_gpu1_$(date +%F_%H%M).log
+```
+
+Fit the pose expectation and threshold on trajectory-disjoint train/test sets:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+TRACE_PATHS='/data/ab575577/worldmem/outputs/memory_policy/worldmem_causal_gate_shadow_b32_60s_n15/access_traces/*.jsonl' \
+CALIBRATION_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/causal_gate_b32_60s \
+bash scripts/calibrate_worldmem_causal_gate.sh
+
+python -m json.tool \
+  /data/ab575577/worldmem/outputs/memory_policy/metrics/causal_gate_b32_60s/calibration.json
+```
+
+The enforced runner rejects the artifact unless `deployment_approved` is true.
+When it passes, run one video first:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+CAL=/data/ab575577/worldmem/outputs/memory_policy/metrics/causal_gate_b32_60s/calibration.json
+
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+MEMORY_POLICY=causal_consistency_coverage_ri \
+MEMORY_BUDGET=32 \
+CAUSAL_GATE_MODE=enforce \
+CAUSAL_GATE_CALIBRATION_PATH="$CAL" \
+COVERAGE_RI_COVERAGE_WEIGHT=0.75 \
+MEMORY_FEATURE_BACKEND=latent \
+FUTURE_SECONDS=60 \
+LIMIT_BATCH=1 \
+GLOBAL_SEED=101 \
+DATASET_SEED=42 \
+RUN_NAME=worldmem_causal_gate_b32_60s_smoke \
+bash scripts/run_worldmem_memory_policy_smoke.sh
+```
+
+Then repeat with `LIMIT_BATCH=15` and
+`RUN_NAME=worldmem_causal_gate_b32_60s_n15`. Do not set
+`CAUSAL_GATE_REQUIRE_APPROVED=false` for a reported result; that override exists
+only for clearly labeled diagnostics.
+
+On Newton, use the same commands without `/data/ab575577`: set
+`WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results`, and point `TRACE_PATHS`,
+`CALIBRATION_DIR`, and `CAL` under that root.
+
+### Coverage-Hysteresis Validation
+
+The replacement hypothesis is simpler: when a later autoregressive frame covers
+a view already represented by an older generated frame, the older representative
+may be cleaner than the later rewrite. Validate this on the existing unbounded
+60-second rollout before implementing admission.
+
+WorldMem's configured generation `chunk_size` is one frame, not MemCam's
+76-frame stride. The validator reads the actual `target_frame` and
+`target_horizon` values from the run's access trace, samples the final frame of
+each traced chunk, requires a two-chunk gap, and considers generated frames only.
+The clean input context is not present in the saved prediction video and is
+therefore excluded automatically.
+
+Run on CECSL:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUN_NAME=worldmem_unbounded_60s_n30 \
+LIMIT=30 \
+COVERAGE_THRESHOLDS=0.80,0.85,0.90,0.95 \
+MIN_CHUNK_SEPARATION=2 \
+bash scripts/validate_worldmem_coverage_hysteresis.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/coverage_hysteresis_unbounded_60s_$(date +%F_%H%M).log
+```
+
+Inspect the trajectory-bootstrap table without using `column`:
+
+```bash
+cd /data/ab575577/worldmem/outputs/memory_policy/metrics/coverage_hysteresis_unbounded_60s
+
+python - <<'PY'
+import pandas as pd
+
+df = pd.read_csv("summary.csv")
+print(df.to_string(index=False))
+PY
+```
+
+Outputs include:
+
+- `summary.csv` and `summary.json`: trajectory-balanced effects and 95% CIs;
+- `trajectory_summary.csv`: one row per trajectory, threshold, and time subset;
+- `pair_details.csv`: exact older/later frame identities and own-index GT scores;
+- `video_inventory.csv`: traced chunk counts and horizons;
+- `coverage_hysteresis_validation.png`: PSNR, SSIM, and match-count threshold curves.
+
+Positive `older - later` PSNR/SSIM supports hysteresis. Require the effect to be
+consistent across the prespecified threshold sweep, remain positive in the
+45-60 second subset, and involve enough independent trajectories. Confidence
+intervals resample trajectory means, never individual frame pairs. Do not
+implement or tune the runtime policy from whichever single threshold looks best.
+
+On Newton, use `WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results`; the wrapper then
+places all inputs and outputs below that root and never uses `/data/ab575577`.
 
 ### Open Runs
 

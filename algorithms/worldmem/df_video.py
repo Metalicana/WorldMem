@@ -27,10 +27,18 @@ from .memory_policies import (
     BUDGETED_MEMORY_POLICIES,
     FrameMemoryBuffer,
     compute_kcenter_coreset_scores,
+    compute_coverage_ri_fusion_scores,
     compute_marginal_coverage_eviction_scores,
     pairwise_mean_abs_distances,
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
+)
+from .causal_memory_gate import (
+    causal_consistency_score,
+    cosine_similarity as causal_gate_cosine_similarity,
+    load_calibration as load_causal_gate_calibration,
+    normalized_context_weights,
+    pose_components as causal_gate_pose_components,
 )
 from .memory_diagnostics import image_quality_per_image, mean_quality
 import glob
@@ -517,6 +525,47 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.ri_rarity_neighbors = int(getattr(cfg, "ri_rarity_neighbors", 3))
         if self.ri_rarity_neighbors < 1:
             raise ValueError("ri_rarity_neighbors must be >= 1")
+        self.coverage_ri_coverage_weight = float(
+            getattr(cfg, "coverage_ri_coverage_weight", 0.75)
+        )
+        if not 0.0 <= self.coverage_ri_coverage_weight <= 1.0:
+            raise ValueError("coverage_ri_coverage_weight must be in [0, 1]")
+        default_gate_mode = (
+            "enforce"
+            if self.memory_policy == "causal_consistency_coverage_ri"
+            else "off"
+        )
+        self.causal_gate_mode = str(
+            getattr(cfg, "causal_gate_mode", default_gate_mode)
+        )
+        if self.causal_gate_mode not in {"off", "shadow", "enforce"}:
+            raise ValueError("causal_gate_mode must be one of: off, shadow, enforce")
+        if (
+            self.memory_policy == "causal_consistency_coverage_ri"
+            and self.memory_reference_source != "predicted"
+        ):
+            raise ValueError(
+                "causal_consistency_coverage_ri requires "
+                "memory_reference_source='predicted'; a ground-truth bank would "
+                "invalidate admission calibration"
+            )
+        self.causal_gate_calibration_path = getattr(
+            cfg, "causal_gate_calibration_path", None
+        )
+        self.causal_gate_require_approved = bool(
+            getattr(cfg, "causal_gate_require_approved", True)
+        )
+        self._causal_gate_calibration = None
+        if self.causal_gate_mode == "enforce":
+            if not self.causal_gate_calibration_path:
+                raise ValueError(
+                    "causal_gate_mode='enforce' requires "
+                    "+algorithm.causal_gate_calibration_path=<json>"
+                )
+            self._causal_gate_calibration = load_causal_gate_calibration(
+                self.causal_gate_calibration_path,
+                require_approved=self.causal_gate_require_approved,
+            )
         # Retrieval's own FOV-overlap test (_generate_condition_indices), not
         # a memory-policy knob -- was hardcoded (radius=30, num_samples=10000,
         # fov_half_h=52.5, fov_half_v=37.5) with no way to change it. Defaults
@@ -1147,6 +1196,7 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "slam_covisibility",
             "kcenter_coreset",
             "mce",
+            "causal_consistency_coverage_ri",
         }:
             return {0}
         return set()
@@ -1476,6 +1526,17 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "eviction_mce_alpha": detail.get("mce_alpha"),
             "eviction_mce_rarity_neighbors": detail.get("mce_rarity_neighbors"),
             "eviction_mce_num_queries": detail.get("mce_num_queries"),
+            "eviction_fusion_pinned": detail.get("fusion_pinned"),
+            "eviction_fusion_coverage_weight": detail.get(
+                "fusion_coverage_weight"
+            ),
+            "eviction_fusion_ri_weight": detail.get("fusion_ri_weight"),
+            "eviction_fusion_coverage_raw": detail.get("fusion_coverage_raw"),
+            "eviction_fusion_coverage_normalized": detail.get(
+                "fusion_coverage_normalized"
+            ),
+            "eviction_fusion_ri_raw": detail.get("fusion_ri_raw"),
+            "eviction_fusion_ri_normalized": detail.get("fusion_ri_normalized"),
         }
 
     def _compute_memory_scores(self, frame_indices, c2w_mat, xs_pred, batch_index, archive_frame_indices=None):
@@ -1550,6 +1611,21 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 return_details=True,
             )
 
+        if self.memory_policy == "causal_consistency_coverage_ri":
+            c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
+            return compute_coverage_ri_fusion_scores(
+                memory_frame_indices=frame_indices,
+                c2ws=c2ws,
+                latent_features=primary_features,
+                rarity_features=primary_features,
+                irreplaceability_features=rgb_features,
+                irreplaceability_metric=irreplaceability_metric,
+                pinned_frames=pinned_frames,
+                coverage_weight=self.coverage_ri_coverage_weight,
+                rarity_neighbors=self.ri_rarity_neighbors,
+                return_details=True,
+            )
+
         return None, {}
 
     def _build_memory_buffers(self, n_context_frames, batch_size, c2w_mat, xs_pred):
@@ -1558,7 +1634,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
         memory_buffers = []
         initial_frames = list(range(n_context_frames))
-        protected_frames = {max(n_context_frames - 1, 0)}
+        protected_frames = (
+            set()
+            if self.memory_policy == "causal_consistency_coverage_ri"
+            else {max(n_context_frames - 1, 0)}
+        )
         for batch_index in range(batch_size):
             buffer = FrameMemoryBuffer(
                 policy=self.memory_policy,
@@ -1720,26 +1800,210 @@ class WorldMemMinecraft(DiffusionForcingBase):
             keep_ranks.update(int(position) for position in positions)
         return [(int(ranked[rank]), int(rank)) for rank in sorted(keep_ranks)]
 
-    def _update_memory_buffers(self, memory_buffers, curr_frame, horizon, c2w_mat, xs_pred):
+    def _causal_gate_parent_records(self, batch_index, target_frame):
+        records = [
+            record
+            for record in self._last_retrieval_trace
+            if int(record.get("batch_index", 0)) == int(batch_index)
+            and int(record.get("target_frame", -1)) <= int(target_frame)
+            < int(record.get("target_frame", -1))
+            + int(record.get("target_horizon", 1))
+        ]
+        return sorted(records, key=lambda record: int(record.get("context_slot", 0)))
+
+    def _causal_gate_decisions(
+        self,
+        new_frames,
+        batch_index,
+        c2w_mat,
+        memory_source_latents,
+        gt_latents,
+        frame_idx,
+    ):
+        decisions = {}
+        if self.memory_policy != "causal_consistency_coverage_ri":
+            return decisions
+        if self.causal_gate_mode == "off":
+            return decisions
+
+        c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
+        for target_frame in new_frames:
+            parent_records = self._causal_gate_parent_records(
+                batch_index, target_frame
+            )
+            parent_frames = [
+                int(record["selected_memory_frame"])
+                for record in parent_records
+            ]
+            if not parent_frames:
+                raise RuntimeError(
+                    "causal admission gate could not find the retrieved parents "
+                    f"for target frame {target_frame}"
+                )
+
+            feature_indices = [target_frame, *parent_frames]
+            source_features = self._latent_feature_dict(
+                memory_source_latents,
+                feature_indices,
+                batch_index,
+            )
+            target_feature = source_features[target_frame]
+            context_features = [source_features[frame] for frame in parent_frames]
+            overlaps = [record.get("selected_overlap") for record in parent_records]
+            weights = normalized_context_weights(overlaps)
+
+            if self.causal_gate_mode == "enforce":
+                gate_result = causal_consistency_score(
+                    target_feature=target_feature,
+                    context_features=context_features,
+                    c2ws=c2ws,
+                    target_frame=target_frame,
+                    context_frames=parent_frames,
+                    overlaps=overlaps,
+                    calibration=self._causal_gate_calibration,
+                )
+                admitted = bool(gate_result["admitted"])
+                score = float(gate_result["score"])
+                threshold = float(gate_result["threshold"])
+                parent_rows = gate_result["parents"]
+                weight_source = gate_result["weight_source"]
+                decision_source = "calibrated_online_gate"
+            else:
+                admitted = True
+                score = None
+                threshold = None
+                weight_source = (
+                    "positive_overlap"
+                    if any(float(value or 0.0) > 0.0 for value in overlaps)
+                    else "uniform"
+                )
+                decision_source = "shadow_admit_all"
+                parent_rows = []
+                for parent_frame, parent_feature, weight, overlap in zip(
+                    parent_frames, context_features, weights, overlaps
+                ):
+                    pose = causal_gate_pose_components(
+                        c2ws, target_frame, parent_frame
+                    )
+                    parent_rows.append(
+                        {
+                            "frame": int(parent_frame),
+                            "weight": float(weight),
+                            "overlap": (
+                                None if overlap is None else float(overlap)
+                            ),
+                            "generated_similarity": causal_gate_cosine_similarity(
+                                target_feature, parent_feature
+                            ),
+                            "translation": pose["translation"],
+                            "rotation_rad": pose["rotation_rad"],
+                        }
+                    )
+
+            event = {
+                "event": "causal_gate_observation",
+                "phase": "generation",
+                "batch_index": int(batch_index),
+                "target_frame": int(target_frame),
+                "target_original_frame_index": (
+                    int(frame_idx[target_frame, batch_index].item())
+                    if frame_idx is not None
+                    else None
+                ),
+                "causal_gate_mode": self.causal_gate_mode,
+                "causal_gate_feature_backend": "latent",
+                "causal_gate_score": score,
+                "causal_gate_threshold": threshold,
+                "causal_gate_admitted": admitted,
+                "causal_gate_decision_source": decision_source,
+                "causal_gate_weight_source": weight_source,
+                "causal_gate_parent_count": len(parent_rows),
+                "causal_gate_parents": parent_rows,
+            }
+
+            # These fields are calibration labels only. The enforced branch
+            # above has already made its decision without consulting GT.
+            if self.causal_gate_mode == "shadow" and gt_latents is not None:
+                gt_features = self._latent_feature_dict(
+                    gt_latents,
+                    feature_indices,
+                    batch_index,
+                )
+                gt_target = gt_features[target_frame]
+                event["target_generated_to_gt_similarity"] = (
+                    causal_gate_cosine_similarity(target_feature, gt_target)
+                )
+                generated_target = (
+                    memory_source_latents[target_frame, batch_index]
+                    .detach()
+                    .float()
+                    .cpu()
+                )
+                gt_target_latent = (
+                    gt_latents[target_frame, batch_index]
+                    .detach()
+                    .float()
+                    .cpu()
+                )
+                event["target_generated_to_gt_mse"] = float(
+                    torch.mean((generated_target - gt_target_latent) ** 2).item()
+                )
+                for parent_row, parent_frame in zip(parent_rows, parent_frames):
+                    parent_row["gt_similarity"] = causal_gate_cosine_similarity(
+                        gt_target, gt_features[parent_frame]
+                    )
+
+            decisions[target_frame] = event
+        return decisions
+
+    def _update_memory_buffers(
+        self,
+        memory_buffers,
+        curr_frame,
+        horizon,
+        c2w_mat,
+        memory_source_latents,
+        gt_latents=None,
+        frame_idx=None,
+    ):
         if memory_buffers is None:
             return
 
         new_frames = list(range(curr_frame, curr_frame + horizon))
-        protected_frames = {curr_frame + horizon - 1}
+        protected_frames = (
+            set()
+            if self.memory_policy == "causal_consistency_coverage_ri"
+            else {curr_frame + horizon - 1}
+        )
         for batch_index, buffer in enumerate(memory_buffers):
+            gate_decisions = self._causal_gate_decisions(
+                new_frames=new_frames,
+                batch_index=batch_index,
+                c2w_mat=c2w_mat,
+                memory_source_latents=memory_source_latents,
+                gt_latents=gt_latents,
+                frame_idx=frame_idx,
+            )
+            admitted_frames = [
+                frame
+                for frame in new_frames
+                if gate_decisions.get(frame, {}).get("causal_gate_admitted", True)
+            ]
             current_memory = buffer.candidates()
             prospective_memory = current_memory + [
-                frame_idx for frame_idx in new_frames if frame_idx not in current_memory
+                frame_idx
+                for frame_idx in admitted_frames
+                if frame_idx not in current_memory
             ]
             scores, score_details = self._compute_memory_scores(
                 prospective_memory,
                 c2w_mat,
-                xs_pred,
+                memory_source_latents,
                 batch_index,
                 archive_frame_indices=self._kcenter_archive_indices(curr_frame + horizon),
             )
             evicted = buffer.update(
-                new_frames,
+                admitted_frames,
                 eviction_scores=scores,
                 protected_frames=protected_frames,
             )
@@ -1757,6 +2021,12 @@ class WorldMemMinecraft(DiffusionForcingBase):
                         **self._memory_eviction_detail_fields(detail),
                     }
                 )
+            for target_frame, event in gate_decisions.items():
+                event["causal_gate_retained_after_update"] = bool(
+                    target_frame in buffer.candidates()
+                )
+                event["stored_memory_size_after_update"] = len(buffer)
+                self._write_access_trace(event)
         self._prune_memory_feature_caches(memory_buffers)
 
     def _generate_condition_indices(
@@ -2388,6 +2658,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "gt_memory_replay_target_frame": self.gt_memory_replay_target_frame,
                 "gt_memory_replay_expected_indices": self.gt_memory_replay_expected_indices,
                 "gt_memory_replay_compute_dino": self.gt_memory_replay_compute_dino,
+                "coverage_ri_coverage_weight": self.coverage_ri_coverage_weight,
+                "causal_gate_mode": self.causal_gate_mode,
+                "causal_gate_calibration_path": self.causal_gate_calibration_path,
+                "causal_gate_require_approved": self.causal_gate_require_approved,
             }
         )
         self._record_memory_bank_diagnostics(
@@ -2677,6 +2951,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 horizon,
                 c2w_mat,
                 memory_source_latents,
+                gt_latents=xs,
+                frame_idx=frame_idx,
             )
             gpu_memory_bank = self._sync_gpu_memory_bank(
                 gpu_memory_bank,

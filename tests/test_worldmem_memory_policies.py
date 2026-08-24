@@ -21,6 +21,7 @@ compute_rarity_irreplaceability_scores = (
 compute_marginal_coverage_eviction_scores = (
     POLICIES.compute_marginal_coverage_eviction_scores
 )
+compute_coverage_ri_fusion_scores = POLICIES.compute_coverage_ri_fusion_scores
 estimate_cluster_threshold = POLICIES.estimate_cluster_threshold
 connected_components_from_threshold = POLICIES.connected_components_from_threshold
 cosine_distances = POLICIES.cosine_distances
@@ -112,6 +113,67 @@ class RarityIrreplaceabilityTest(unittest.TestCase):
         self.assertAlmostEqual(details[1]["irreplaceability"], 0.1)
         self.assertAlmostEqual(details[2]["irreplaceability"], 0.9)
         self.assertEqual(details[2]["irreplaceability_metric"], "mean_abs")
+
+
+class CoverageRIFusionTest(unittest.TestCase):
+    def setUp(self):
+        self.frames = [0, 1, 2, 3]
+        self.c2ws = make_line_c2ws([0.0, 0.1, 8.0, 20.0])
+        self.features = {
+            0: np.asarray([1.0, 0.0, 0.0]),
+            1: np.asarray([0.99, 0.01, 0.0]),
+            2: np.asarray([0.0, 1.0, 0.0]),
+            3: np.asarray([0.0, 0.0, 1.0]),
+        }
+
+    def test_fusion_matches_declared_weighted_sum(self):
+        scores, details = compute_coverage_ri_fusion_scores(
+            memory_frame_indices=self.frames,
+            c2ws=self.c2ws,
+            latent_features=self.features,
+            coverage_weight=0.75,
+            rarity_neighbors=1,
+            return_details=True,
+        )
+        for frame in self.frames:
+            expected = (
+                0.75 * details[frame]["fusion_coverage_normalized"]
+                + 0.25 * details[frame]["fusion_ri_normalized"]
+            )
+            self.assertAlmostEqual(scores[frame], expected)
+
+    def test_pinning_happens_after_component_normalization(self):
+        scores, details = compute_coverage_ri_fusion_scores(
+            memory_frame_indices=self.frames,
+            c2ws=self.c2ws,
+            latent_features=self.features,
+            pinned_frames={0},
+            coverage_weight=0.75,
+            rarity_neighbors=1,
+            return_details=True,
+        )
+        self.assertTrue(np.isinf(scores[0]))
+        self.assertTrue(details[0]["fusion_pinned"])
+        self.assertTrue(np.isfinite(details[0]["fusion_coverage_normalized"]))
+        self.assertTrue(np.isfinite(details[0]["fusion_ri_normalized"]))
+
+    def test_policy_buffer_enforces_budget(self):
+        scores = compute_coverage_ri_fusion_scores(
+            memory_frame_indices=self.frames,
+            c2ws=self.c2ws,
+            latent_features=self.features,
+            pinned_frames={0},
+            coverage_weight=0.75,
+            rarity_neighbors=1,
+        )
+        buffer = FrameMemoryBuffer(
+            policy="causal_consistency_coverage_ri",
+            budget=2,
+            pinned_frames={0},
+        )
+        buffer.update(self.frames, eviction_scores=scores)
+        self.assertEqual(len(buffer), 2)
+        self.assertIn(0, buffer.candidates())
 
 
 class EstimateClusterThresholdTest(unittest.TestCase):

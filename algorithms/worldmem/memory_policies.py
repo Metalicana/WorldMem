@@ -12,6 +12,7 @@ SUPPORTED_MEMORY_POLICIES = (
     "slam_covisibility",
     "kcenter_coreset",
     "mce",
+    "causal_consistency_coverage_ri",
 )
 BUDGETED_MEMORY_POLICIES = (
     "random_cap",
@@ -20,6 +21,7 @@ BUDGETED_MEMORY_POLICIES = (
     "slam_covisibility",
     "kcenter_coreset",
     "mce",
+    "causal_consistency_coverage_ri",
 )
 
 
@@ -446,6 +448,120 @@ def compute_slam_covisibility_scores(
             "n_other_observers": int(n_other_observers),
         }
 
+    return (scores, details) if return_details else scores
+
+
+def _min_max_normalize_scores(frame_indices, raw_scores):
+    values = np.asarray([raw_scores[idx] for idx in frame_indices], dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return {idx: 0.0 for idx in frame_indices}
+
+    low = float(finite.min())
+    high = float(finite.max())
+    span = high - low
+    normalized = {}
+    for frame_idx, value in zip(frame_indices, values):
+        if not np.isfinite(value):
+            normalized[frame_idx] = 1.0
+        elif span <= 1e-12:
+            normalized[frame_idx] = 1.0
+        else:
+            normalized[frame_idx] = (float(value) - low) / span
+    return normalized
+
+
+def compute_coverage_ri_fusion_scores(
+    memory_frame_indices,
+    c2ws,
+    latent_features=None,
+    rarity_features=None,
+    irreplaceability_features=None,
+    irreplaceability_metric="cosine",
+    pinned_frames=None,
+    coverage_weight=0.75,
+    rarity_neighbors=3,
+    return_details=False,
+):
+    """Fuse independently normalized geometric-coverage and RI utilities.
+
+    The admission decision is intentionally not part of this function. It scores
+    only candidates that have already passed the causal-consistency gate.
+    """
+    memory_frame_indices = list(memory_frame_indices)
+    pinned_frames = set(pinned_frames or [])
+    coverage_weight = float(coverage_weight)
+    if not 0.0 <= coverage_weight <= 1.0:
+        raise ValueError("coverage_weight must be in [0, 1]")
+    if not memory_frame_indices:
+        return ({}, {}) if return_details else {}
+
+    coverage_scores, coverage_details = compute_slam_covisibility_scores(
+        memory_frame_indices=memory_frame_indices,
+        c2ws=c2ws,
+        pinned_frames=None,
+        latent_features=latent_features,
+        return_details=True,
+    )
+    ri_scores, ri_details = compute_rarity_irreplaceability_scores(
+        memory_frame_indices=memory_frame_indices,
+        latent_features=latent_features,
+        rarity_features=rarity_features,
+        irreplaceability_features=irreplaceability_features,
+        irreplaceability_metric=irreplaceability_metric,
+        pinned_frames=None,
+        rarity_neighbors=rarity_neighbors,
+        return_details=True,
+    )
+    coverage_normalized = _min_max_normalize_scores(
+        memory_frame_indices, coverage_scores
+    )
+    ri_normalized = _min_max_normalize_scores(memory_frame_indices, ri_scores)
+
+    scores = {}
+    details = {}
+    for frame_idx in memory_frame_indices:
+        pinned = frame_idx in pinned_frames
+        fused = (
+            coverage_weight * coverage_normalized[frame_idx]
+            + (1.0 - coverage_weight) * ri_normalized[frame_idx]
+        )
+        score = float("inf") if pinned else float(fused)
+        scores[frame_idx] = score
+        details[frame_idx] = {
+            "score": score,
+            "fusion_pinned": pinned,
+            "fusion_coverage_weight": coverage_weight,
+            "fusion_ri_weight": 1.0 - coverage_weight,
+            "fusion_coverage_raw": float(coverage_scores[frame_idx]),
+            "fusion_coverage_normalized": float(
+                coverage_normalized[frame_idx]
+            ),
+            "fusion_ri_raw": float(ri_scores[frame_idx]),
+            "fusion_ri_normalized": float(ri_normalized[frame_idx]),
+            "rarity": ri_details[frame_idx]["rarity"],
+            "irreplaceability": ri_details[frame_idx]["irreplaceability"],
+            "cluster_id": ri_details[frame_idx]["cluster_id"],
+            "cluster_size": ri_details[frame_idx]["cluster_size"],
+            "cluster_threshold": ri_details[frame_idx]["cluster_threshold"],
+            "cluster_rarity_neighbors": ri_details[frame_idx][
+                "cluster_rarity_neighbors"
+            ],
+            "nearest_frame": ri_details[frame_idx]["nearest_frame"],
+            "nearest_distance": ri_details[frame_idx]["nearest_distance"],
+            "redundancy_ratio": coverage_details[frame_idx]["redundancy_ratio"],
+            "covisible_observers": coverage_details[frame_idx][
+                "covisible_observers"
+            ],
+            "max_covisibility": coverage_details[frame_idx]["max_covisibility"],
+            "nearest_covisible_frame": coverage_details[frame_idx][
+                "nearest_covisible_frame"
+            ],
+            "marginal_contribution": coverage_details[frame_idx][
+                "marginal_contribution"
+            ],
+            "unique_bonus": coverage_details[frame_idx]["unique_bonus"],
+        }
     return (scores, details) if return_details else scores
 
 

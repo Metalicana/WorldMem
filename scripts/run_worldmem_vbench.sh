@@ -4,10 +4,8 @@
 # same VBench invocation and dimension set, adapted to WorldMem's actual video
 # layout: MemCam's runs are a flat directory of *_60s_custom.mp4 files, but
 # WorldMem's smoke script saves predictions under
-# <run_dir>/videos/test_vis/pred/video_batch*_0_rank0.mp4 (see log_video() in
-# utils/logging_utils.py). VBench's custom_input mode just lists whatever
-# video files are in --videos_path (vbench/__init__.py:build_full_info_json),
-# so no renaming step is needed -- point it straight at the pred/ folder.
+# <run_dir>/videos/test_vis/pred/video_batch*_0_rank0.mp4. This wrapper stages
+# exactly the requested parsed batch IDs before invoking VBench.
 #
 # Dimensions are the 6 MemCam settled on: none of them require a text prompt
 # to score against (unlike e.g. overall_consistency or category dimensions),
@@ -25,11 +23,8 @@
 #   conda activate vbench   # or whatever this machine's VBench env is named
 #   bash scripts/run_worldmem_vbench.sh
 #
-# Cost note: 6 quality-model dimensions x every video in every run adds up
-# fast -- the default RUNS below is the full 21-cell sweep (315 videos at
-# n=15). Consider narrowing RUNS to a handful of cells first to gauge
-# per-video wall-clock before committing to the whole grid, the same way the
-# MCE generation sweep was profiled before being queued in full.
+# The default is the frozen six-policy B32 roster, always matched on batch IDs
+# 0..14. Override RUNS only for an explicitly controlled ablation.
 
 set -euo pipefail
 
@@ -48,15 +43,17 @@ RESULTS_ROOT="${RESULTS_ROOT:-$STORAGE_ROOT/outputs/memory_policy}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$RESULTS_ROOT/metrics/vbench_results}"
 DIMENSIONS="${DIMENSIONS:-subject_consistency background_consistency motion_smoothness dynamic_degree aesthetic_quality imaging_quality}"
 FORCE="${FORCE:-0}"
+LIMIT="${LIMIT:-15}"
+STAGING_ROOT="${STAGING_ROOT:-$OUTPUT_ROOT/_input_staging}"
 
 RUNS="${RUNS:-worldmem_unbounded_60s_n30 \
-worldmem_fifo_b16_60s_n30 worldmem_fifo_b32_60s_n30 worldmem_fifo_b64_60s_n30 worldmem_fifo_b128_60s_n30 \
-worldmem_rarity_irreplaceability_b16_60s_n30 worldmem_rarity_irreplaceability_b32_60s_n30 worldmem_rarity_irreplaceability_b64_60s_n30 worldmem_rarity_irreplaceability_b128_60s_n30 \
-worldmem_slam_covisibility_b16_60s_n30 worldmem_slam_covisibility_b32_60s_n30 worldmem_slam_covisibility_b64_60s_n30 worldmem_slam_covisibility_b128_60s_n30 \
-worldmem_kcenter_coreset_b16_60s_n15 worldmem_kcenter_coreset_b32_60s_n15 worldmem_kcenter_coreset_b64_60s_n15 worldmem_kcenter_coreset_b128_60s_n15 \
-worldmem_mce_b16_60s_n15 worldmem_mce_b32_60s_n15 worldmem_mce_b64_60s_n15 worldmem_mce_b128_60s_n15}"
+worldmem_fifo_b32_60s_n30 \
+worldmem_rarity_irreplaceability_b32_60s_n30 \
+worldmem_slam_covisibility_b32_60s_n30 \
+worldmem_kcenter_coreset_b32_60s_n15 \
+worldmem_mce_b32_60s_n15}"
 
-mkdir -p "$OUTPUT_ROOT"
+mkdir -p "$OUTPUT_ROOT" "$STAGING_ROOT"
 cd "$VBENCH_ROOT"
 
 echo "WorldMem VBench batch eval"
@@ -64,29 +61,53 @@ echo "VBench root: $VBENCH_ROOT"
 echo "Results root: $RESULTS_ROOT"
 echo "Output root: $OUTPUT_ROOT"
 echo "Dimensions: $DIMENSIONS"
+echo "Matched batch limit: $LIMIT"
 echo "Runs: $RUNS"
 echo "Started: $(date)"
 
 for run in $RUNS; do
   out_dir="$OUTPUT_ROOT/$run"
-  if [ "$FORCE" != "1" ] && compgen -G "$out_dir"/*_eval_results.json > /dev/null 2>&1; then
-    echo "[skip] $run already has eval results in $out_dir"
-    continue
-  fi
-
   video_dir="$RESULTS_ROOT/$run/videos/test_vis/pred"
   if [ ! -d "$video_dir" ]; then
-    echo "[skip] $run -- no directory at $video_dir"
+    echo "[error] $run -- no directory at $video_dir" >&2
+    exit 1
+  fi
+
+  stage_dir="$STAGING_ROOT/$run"
+  stage_metadata="$stage_dir/input_selection.json"
+  stage_cmd=(
+    python "$WORLDMEM_REPO_ROOT/utils/stage_worldmem_vbench_input.py"
+    --source-dir "$video_dir"
+    --stage-dir "$stage_dir"
+    --metadata-path "$stage_metadata"
+    --repo-root "$WORLDMEM_REPO_ROOT"
+    --run-name "$run"
+    --limit "$LIMIT"
+    --mode custom_input
+    --dimensions "$DIMENSIONS"
+  )
+  if [ "$FORCE" = "1" ]; then
+    stage_cmd+=(--reset-derived)
+  fi
+  "${stage_cmd[@]}"
+
+  if compgen -G "$out_dir"/*_eval_results.json > /dev/null 2>&1 && [ "$FORCE" != "1" ]; then
+    if [ ! -f "$out_dir/input_selection.json" ] || ! cmp -s "$stage_metadata" "$out_dir/input_selection.json"; then
+      echo "[error] $run has stale or unmatched VBench output. Inspect it or rerun explicitly with FORCE=1." >&2
+      exit 1
+    fi
+    echo "[skip] $run already has matched first-$LIMIT eval results in $out_dir"
     continue
   fi
 
-  video_count="$(find "$video_dir" -maxdepth 1 -name 'video_batch*.mp4' | wc -l)"
-  echo "[run] $run  ($video_count videos)  $(date)"
+  echo "[run] $run  ($LIMIT matched videos)  $(date)"
   python evaluate.py \
     --dimension $DIMENSIONS \
-    --videos_path "$video_dir" \
+    --videos_path "$stage_dir" \
     --mode custom_input \
     --output_path "$out_dir"
+  mkdir -p "$out_dir"
+  cp "$stage_metadata" "$out_dir/input_selection.json"
   echo "[done] $run  $(date)"
 done
 

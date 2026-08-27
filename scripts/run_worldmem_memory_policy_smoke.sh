@@ -20,7 +20,7 @@ MEMORY_REFERENCE_SOURCE="${MEMORY_REFERENCE_SOURCE:-predicted}"
 # mce's kernel/clustering wants DINO content features, not pooled VAE latents;
 # only the *default* differs by policy -- set MEMORY_FEATURE_BACKEND explicitly
 # to override either way.
-if [ "$MEMORY_POLICY" = "mce" ]; then
+if { [ "$MEMORY_POLICY" = "mce" ] || [ "$MEMORY_POLICY" = "rarity_only" ] || [ "$MEMORY_POLICY" = "slam_rarity_blend" ]; }; then
   MEMORY_FEATURE_BACKEND="${MEMORY_FEATURE_BACKEND:-dino}"
 else
   MEMORY_FEATURE_BACKEND="${MEMORY_FEATURE_BACKEND:-latent}"
@@ -92,7 +92,7 @@ RUN_NAME="${RUN_NAME:-worldmem_${MEMORY_POLICY}${MEMORY_BUDGET:+_b${MEMORY_BUDGE
 OUTPUT_DIR="${OUTPUT_DIR:-$STORAGE_ROOT/outputs/memory_policy/$RUN_NAME}"
 TRACE_PATH="${TRACE_PATH:-$OUTPUT_DIR/access_traces/$RUN_NAME.jsonl}"
 
-if { [ "$MEMORY_POLICY" = "random_cap" ] || [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ] || [ "$MEMORY_POLICY" = "mce" ] || [ "$MEMORY_POLICY" = "causal_consistency_coverage_ri" ] || [ "$MEMORY_POLICY" = "coverage_hysteresis" ]; } && [ -z "$MEMORY_BUDGET" ]; then
+if { [ "$MEMORY_POLICY" = "random_cap" ] || [ "$MEMORY_POLICY" = "fifo" ] || [ "$MEMORY_POLICY" = "rarity_irreplaceability" ] || [ "$MEMORY_POLICY" = "slam_covisibility" ] || [ "$MEMORY_POLICY" = "kcenter_coreset" ] || [ "$MEMORY_POLICY" = "mce" ] || [ "$MEMORY_POLICY" = "causal_consistency_coverage_ri" ] || [ "$MEMORY_POLICY" = "coverage_hysteresis" ] || [ "$MEMORY_POLICY" = "rarity_only" ] || [ "$MEMORY_POLICY" = "slam_rarity_blend" ]; } && [ -z "$MEMORY_BUDGET" ]; then
   echo "MEMORY_BUDGET is required when MEMORY_POLICY=$MEMORY_POLICY" >&2
   exit 2
 fi
@@ -301,6 +301,10 @@ if [ "$MEMORY_POLICY" = "coverage_hysteresis" ]; then
   echo "Hysteresis geometry: radius=$HYSTERESIS_FOV_RADIUS half_h=$HYSTERESIS_FOV_HALF_H half_v=$HYSTERESIS_FOV_HALF_V"
   echo "Retention weights: coverage=$COVERAGE_RI_COVERAGE_WEIGHT ri=$(awk "BEGIN { print 1.0 - $COVERAGE_RI_COVERAGE_WEIGHT }")"
   echo "RI rarity neighbors: $RI_RARITY_NEIGHBORS"
+fi
+if { [ "$MEMORY_POLICY" = "rarity_only" ] || [ "$MEMORY_POLICY" = "slam_rarity_blend" ]; }; then
+  echo "Controlled rarity ablation: DINO cluster rarity only"
+  echo "Rarity neighbors: $RI_RARITY_NEIGHBORS"
 fi
 echo "Memory feature device: $MEMORY_FEATURE_DEVICE"
 echo "Dataset seed: $DATASET_SEED"

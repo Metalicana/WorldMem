@@ -14,6 +14,8 @@ SUPPORTED_MEMORY_POLICIES = (
     "mce",
     "causal_consistency_coverage_ri",
     "coverage_hysteresis",
+    "rarity_only",
+    "slam_rarity_blend",
 )
 BUDGETED_MEMORY_POLICIES = (
     "random_cap",
@@ -24,6 +26,8 @@ BUDGETED_MEMORY_POLICIES = (
     "mce",
     "causal_consistency_coverage_ri",
     "coverage_hysteresis",
+    "rarity_only",
+    "slam_rarity_blend",
 )
 
 
@@ -497,6 +501,64 @@ def compute_rarity_irreplaceability_scores(
     return (scores, details) if return_details else scores
 
 
+def compute_rarity_only_scores(
+    memory_frame_indices,
+    rarity_features=None,
+    latent_features=None,
+    pinned_frames=None,
+    rarity_neighbors=3,
+    return_details=False,
+):
+    """Score frames only by inverse DINO-cluster frequency."""
+    memory_frame_indices = list(memory_frame_indices)
+    pinned_frames = set(pinned_frames or [])
+    if not memory_frame_indices:
+        return ({}, {}) if return_details else {}
+    if rarity_features is None:
+        rarity_features = latent_features
+    if rarity_features is None:
+        raise ValueError("rarity_only requires rarity_features")
+
+    feature_matrix = _feature_matrix(memory_frame_indices, rarity_features)
+    pairwise = cosine_distances(feature_matrix)
+    np.fill_diagonal(pairwise, np.inf)
+    if len(memory_frame_indices) == 1:
+        cluster_ids = np.zeros(1, dtype=np.int64)
+        cluster_sizes = np.ones(1, dtype=np.float64)
+        threshold = 0.0
+    else:
+        threshold = estimate_cluster_threshold(pairwise, rarity_neighbors)
+        cluster_pairwise = pairwise.copy()
+        np.fill_diagonal(cluster_pairwise, 0.0)
+        cluster_ids, clusters = connected_components_from_threshold(
+            cluster_pairwise,
+            threshold=threshold,
+        )
+        cluster_sizes = np.asarray(
+            [len(clusters[cluster_id]) for cluster_id in cluster_ids],
+            dtype=np.float64,
+        )
+
+    memory_count = float(len(memory_frame_indices))
+    rarity = np.log((memory_count + 1.0) / np.maximum(cluster_sizes, 1.0))
+    scores = {}
+    details = {}
+    for index, frame_idx in enumerate(memory_frame_indices):
+        pinned = frame_idx in pinned_frames
+        score = float("inf") if pinned else float(rarity[index])
+        scores[frame_idx] = score
+        details[frame_idx] = {
+            "score": score,
+            "rarity": float(rarity[index]),
+            "rarity_only": True,
+            "cluster_id": int(cluster_ids[index]),
+            "cluster_size": int(cluster_sizes[index]),
+            "cluster_threshold": float(threshold),
+            "cluster_rarity_neighbors": int(rarity_neighbors),
+        }
+    return (scores, details) if return_details else scores
+
+
 def _feature_cosine_similarity(memory_frame_indices, features):
     feature_matrix = _feature_matrix(memory_frame_indices, features)
     norms = np.linalg.norm(feature_matrix, axis=1, keepdims=True)
@@ -695,6 +757,85 @@ def compute_coverage_ri_fusion_scores(
             "marginal_contribution": coverage_details[frame_idx][
                 "marginal_contribution"
             ],
+            "unique_bonus": coverage_details[frame_idx]["unique_bonus"],
+        }
+    return (scores, details) if return_details else scores
+
+
+def compute_slam_rarity_blend_scores(
+    memory_frame_indices,
+    c2ws,
+    coverage_features,
+    rarity_features,
+    pinned_frames=None,
+    coverage_weight=0.75,
+    rarity_neighbors=3,
+    return_details=False,
+):
+    """Blend existing Geometric Coverage with DINO cluster rarity only."""
+    memory_frame_indices = list(memory_frame_indices)
+    pinned_frames = set(pinned_frames or [])
+    coverage_weight = float(coverage_weight)
+    if not 0.0 <= coverage_weight <= 1.0:
+        raise ValueError("coverage_weight must be in [0, 1]")
+    if not memory_frame_indices:
+        return ({}, {}) if return_details else {}
+
+    coverage_scores, coverage_details = compute_slam_covisibility_scores(
+        memory_frame_indices=memory_frame_indices,
+        c2ws=c2ws,
+        pinned_frames=None,
+        latent_features=coverage_features,
+        return_details=True,
+    )
+    rarity_scores, rarity_details = compute_rarity_only_scores(
+        memory_frame_indices=memory_frame_indices,
+        rarity_features=rarity_features,
+        pinned_frames=None,
+        rarity_neighbors=rarity_neighbors,
+        return_details=True,
+    )
+    coverage_normalized = _min_max_normalize_scores(
+        memory_frame_indices,
+        coverage_scores,
+    )
+    rarity_normalized = _min_max_normalize_scores(
+        memory_frame_indices,
+        rarity_scores,
+    )
+
+    scores = {}
+    details = {}
+    for frame_idx in memory_frame_indices:
+        pinned = frame_idx in pinned_frames
+        fused = (
+            coverage_weight * coverage_normalized[frame_idx]
+            + (1.0 - coverage_weight) * rarity_normalized[frame_idx]
+        )
+        score = float("inf") if pinned else float(fused)
+        scores[frame_idx] = score
+        details[frame_idx] = {
+            "score": score,
+            "slam_rarity_pinned": pinned,
+            "slam_rarity_coverage_weight": coverage_weight,
+            "slam_rarity_rarity_weight": 1.0 - coverage_weight,
+            "slam_rarity_coverage_raw": float(coverage_scores[frame_idx]),
+            "slam_rarity_coverage_normalized": float(
+                coverage_normalized[frame_idx]
+            ),
+            "slam_rarity_rarity_raw": float(rarity_scores[frame_idx]),
+            "slam_rarity_rarity_normalized": float(
+                rarity_normalized[frame_idx]
+            ),
+            "rarity": rarity_details[frame_idx]["rarity"],
+            "cluster_id": rarity_details[frame_idx]["cluster_id"],
+            "cluster_size": rarity_details[frame_idx]["cluster_size"],
+            "cluster_threshold": rarity_details[frame_idx]["cluster_threshold"],
+            "cluster_rarity_neighbors": rarity_details[frame_idx][
+                "cluster_rarity_neighbors"
+            ],
+            "redundancy_ratio": coverage_details[frame_idx]["redundancy_ratio"],
+            "max_covisibility": coverage_details[frame_idx]["max_covisibility"],
             "unique_bonus": coverage_details[frame_idx]["unique_bonus"],
         }
     return (scores, details) if return_details else scores

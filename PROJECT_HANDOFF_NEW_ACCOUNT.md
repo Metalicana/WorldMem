@@ -710,6 +710,26 @@ endpoint bank slot because its native recent sliding window remains unchanged.
 The primary CECSL B32/60s/n15 command is documented in
 `RUNNING_CECSL_NEWTON.md`.
 
+Final-evaluation decision on 2026-08-26: do not generate Coverage-Hysteresis for
+the current paper. MemCam's completed runtime result lost at 60-second FVD and
+four meaningful VBench dimensions. Pure Geometric Coverage is the primary
+method. The locked cross-system WorldMem roster is Unbounded, FIFO-32,
+Latent-RI-32, Geometric Coverage-32, K-center-32, and MCE-32, always evaluated
+on batch IDs 0-14.
+
+The only permitted new generation cells are the controlled B32 rarity
+ablations `rarity_only` and `slam_rarity_blend`. They use corrected k=3 DINO
+clusters; the first evicts by log inverse cluster frequency alone, and the
+second blends 0.75 existing latent-aware Geometric Coverage with 0.25 DINO
+rarity after separate min-max normalization. Neither computes RGB
+irreplaceability. Exact CECSL commands are in `RUNNING_CECSL_NEWTON.md`.
+
+Both VBench wrappers now stage exactly the first 15 parsed batch IDs, write an
+input manifest, refuse missing batches, and reject stale unmatched outputs.
+`scripts/build_worldmem_final_metric_status.sh` creates the six-policy CSV/JSON
+completion table and keeps CUT3R explicitly invalid unless a GT-sanity validity
+artifact says otherwise.
+
 ## Common Operational Lessons
 
 - Activate `conda activate worldmem` before every run.

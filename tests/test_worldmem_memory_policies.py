@@ -22,6 +22,9 @@ compute_marginal_coverage_eviction_scores = (
     POLICIES.compute_marginal_coverage_eviction_scores
 )
 compute_coverage_ri_fusion_scores = POLICIES.compute_coverage_ri_fusion_scores
+compute_rarity_only_scores = POLICIES.compute_rarity_only_scores
+compute_slam_covisibility_scores = POLICIES.compute_slam_covisibility_scores
+compute_slam_rarity_blend_scores = POLICIES.compute_slam_rarity_blend_scores
 select_coverage_hysteresis_admissions = (
     POLICIES.select_coverage_hysteresis_admissions
 )
@@ -217,6 +220,78 @@ class CoverageRIFusionTest(unittest.TestCase):
         buffer.update(self.frames, eviction_scores=scores)
         self.assertEqual(len(buffer), 2)
         self.assertIn(0, buffer.candidates())
+
+
+class ControlledRarityAblationTest(unittest.TestCase):
+    def setUp(self):
+        self.frames = [0, 1, 2, 3]
+        self.c2ws = make_line_c2ws([0.0, 0.1, 8.0, 20.0])
+        self.latent_features = {
+            0: np.asarray([1.0, 0.0, 0.0]),
+            1: np.asarray([0.99, 0.01, 0.0]),
+            2: np.asarray([0.0, 1.0, 0.0]),
+            3: np.asarray([0.0, 0.0, 1.0]),
+        }
+        self.dino_features = {
+            0: np.asarray([1.0, 0.0, 0.0, 0.0]),
+            1: np.asarray([0.999, 0.001, 0.0, 0.0]),
+            2: np.asarray([0.0, 1.0, 0.0, 0.0]),
+            3: np.asarray([0.0, 0.0, 1.0, 0.0]),
+        }
+
+    def test_rarity_only_is_exact_inverse_cluster_frequency(self):
+        scores, details = compute_rarity_only_scores(
+            self.frames,
+            rarity_features=self.dino_features,
+            rarity_neighbors=3,
+            return_details=True,
+        )
+        for frame in self.frames:
+            expected = np.log(
+                (len(self.frames) + 1.0) / details[frame]["cluster_size"]
+            )
+            self.assertAlmostEqual(scores[frame], expected)
+            self.assertAlmostEqual(details[frame]["rarity"], expected)
+            self.assertNotIn("irreplaceability", details[frame])
+        self.assertEqual(
+            {row["cluster_rarity_neighbors"] for row in details.values()},
+            {3},
+        )
+
+    def test_slam_rarity_blend_uses_separate_features_and_declared_weights(self):
+        scores, details = compute_slam_rarity_blend_scores(
+            memory_frame_indices=self.frames,
+            c2ws=self.c2ws,
+            coverage_features=self.latent_features,
+            rarity_features=self.dino_features,
+            coverage_weight=0.75,
+            rarity_neighbors=3,
+            return_details=True,
+        )
+        coverage = compute_slam_covisibility_scores(
+            self.frames,
+            c2ws=self.c2ws,
+            latent_features=self.latent_features,
+        )
+        rarity = compute_rarity_only_scores(
+            self.frames,
+            rarity_features=self.dino_features,
+            rarity_neighbors=3,
+        )
+        for frame in self.frames:
+            self.assertAlmostEqual(
+                details[frame]["slam_rarity_coverage_raw"],
+                coverage[frame],
+            )
+            self.assertAlmostEqual(
+                details[frame]["slam_rarity_rarity_raw"],
+                rarity[frame],
+            )
+            expected = (
+                0.75 * details[frame]["slam_rarity_coverage_normalized"]
+                + 0.25 * details[frame]["slam_rarity_rarity_normalized"]
+            )
+            self.assertAlmostEqual(scores[frame], expected)
 
 
 class EstimateClusterThresholdTest(unittest.TestCase):

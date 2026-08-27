@@ -30,7 +30,9 @@ from .memory_policies import (
     compute_coverage_ri_fusion_scores,
     compute_marginal_coverage_eviction_scores,
     pairwise_mean_abs_distances,
+    compute_rarity_only_scores,
     compute_rarity_irreplaceability_scores,
+    compute_slam_rarity_blend_scores,
     compute_slam_covisibility_scores,
     select_coverage_hysteresis_admissions,
 )
@@ -442,7 +444,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
         # latents ("latent", the general default) are a much weaker proxy for that.
         # Only the *implicit* default changes here -- an explicit
         # `memory_feature_backend=...` override always wins regardless of policy.
-        _default_feature_backend = "dino" if self.memory_policy == "mce" else "latent"
+        _default_feature_backend = (
+            "dino"
+            if self.memory_policy in {"mce", "rarity_only", "slam_rarity_blend"}
+            else "latent"
+        )
         self.memory_feature_backend = getattr(
             cfg, "memory_feature_backend", _default_feature_backend
         )
@@ -632,6 +638,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
         if self.memory_feature_backend not in {"latent", "dino", "dino_rgb"}:
             raise ValueError(
                 "memory_feature_backend must be one of: latent, dino, dino_rgb"
+            )
+        if (
+            self.memory_policy in {"rarity_only", "slam_rarity_blend"}
+            and self.memory_feature_backend != "dino"
+        ):
+            raise ValueError(
+                f"{self.memory_policy} requires memory_feature_backend='dino' "
+                "for the controlled DINO-cluster rarity ablation"
             )
         if self.memory_feature_device not in {"auto", "cpu", "cuda"}:
             raise ValueError("memory_feature_device must be one of: auto, cpu, cuda")
@@ -1215,6 +1229,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "mce",
             "causal_consistency_coverage_ri",
             "coverage_hysteresis",
+            "rarity_only",
+            "slam_rarity_blend",
         }:
             return {0}
         return set()
@@ -1555,6 +1571,25 @@ class WorldMemMinecraft(DiffusionForcingBase):
             ),
             "eviction_fusion_ri_raw": detail.get("fusion_ri_raw"),
             "eviction_fusion_ri_normalized": detail.get("fusion_ri_normalized"),
+            "eviction_slam_rarity_pinned": detail.get("slam_rarity_pinned"),
+            "eviction_slam_rarity_coverage_weight": detail.get(
+                "slam_rarity_coverage_weight"
+            ),
+            "eviction_slam_rarity_rarity_weight": detail.get(
+                "slam_rarity_rarity_weight"
+            ),
+            "eviction_slam_rarity_coverage_raw": detail.get(
+                "slam_rarity_coverage_raw"
+            ),
+            "eviction_slam_rarity_coverage_normalized": detail.get(
+                "slam_rarity_coverage_normalized"
+            ),
+            "eviction_slam_rarity_rarity_raw": detail.get(
+                "slam_rarity_rarity_raw"
+            ),
+            "eviction_slam_rarity_rarity_normalized": detail.get(
+                "slam_rarity_rarity_normalized"
+            ),
         }
 
     def _compute_memory_scores(self, frame_indices, c2w_mat, xs_pred, batch_index, archive_frame_indices=None):
@@ -1586,6 +1621,15 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 rarity_features=primary_features,
                 irreplaceability_features=rgb_features,
                 irreplaceability_metric=irreplaceability_metric,
+                pinned_frames=pinned_frames,
+                rarity_neighbors=self.ri_rarity_neighbors,
+                return_details=True,
+            )
+
+        if self.memory_policy == "rarity_only":
+            return compute_rarity_only_scores(
+                memory_frame_indices=frame_indices,
+                rarity_features=primary_features,
                 pinned_frames=pinned_frames,
                 rarity_neighbors=self.ri_rarity_neighbors,
                 return_details=True,
@@ -1641,6 +1685,24 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 rarity_features=primary_features,
                 irreplaceability_features=rgb_features,
                 irreplaceability_metric=irreplaceability_metric,
+                pinned_frames=pinned_frames,
+                coverage_weight=self.coverage_ri_coverage_weight,
+                rarity_neighbors=self.ri_rarity_neighbors,
+                return_details=True,
+            )
+
+        if self.memory_policy == "slam_rarity_blend":
+            c2ws = c2w_mat[:, batch_index].detach().cpu().numpy()
+            coverage_features = self._latent_feature_dict(
+                xs_pred,
+                frame_indices,
+                batch_index,
+            )
+            return compute_slam_rarity_blend_scores(
+                memory_frame_indices=frame_indices,
+                c2ws=c2ws,
+                coverage_features=coverage_features,
+                rarity_features=primary_features,
                 pinned_frames=pinned_frames,
                 coverage_weight=self.coverage_ri_coverage_weight,
                 rarity_neighbors=self.ri_rarity_neighbors,

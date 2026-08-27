@@ -2274,6 +2274,12 @@ places all inputs and outputs below that root and never uses `/data/ab575577`.
 
 ### Coverage-Hysteresis Runtime Policy
 
+**Final-evaluation update (2026-08-26): do not launch this policy for the
+current paper queue.** The implementation and offline diagnostic remain for
+reproducibility, but the completed MemCam runtime policy lost at 60-second FVD
+and on four meaningful VBench dimensions. The final cross-system method is
+pure Geometric Coverage (`slam_covisibility`).
+
 The 30-trajectory validation supports implementing the MemCam policy in
 WorldMem. Across thresholds 0.80/0.85/0.90/0.95, trajectory-bootstrap 95% CIs
 for older-minus-later PSNR and SSIM were entirely positive. At the prespecified
@@ -2338,18 +2344,189 @@ On Newton, set `WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results`, create
 `$HOME/worldmem_results/logs`, and point `tee` there. Do not use the CECSL
 `/data/ab575577` path on Newton.
 
-### Open Runs
+### Final Evaluation Lock (2026-08-26)
 
-1. Run the radius-50 controlled probe. This is the most direct remaining test of
-   whether WorldMem's geometric scale causes the high zero-overlap rate.
-2. Run VBench and VBench-Long. The wrappers are implemented but no values have
-   been collected yet.
-3. Do not use CUT3R for paper claims until its ground-truth sanity check produces
-   sensible camera errors. The current GT sanity result fails that requirement.
-4. Explain why `rarity_neighbors=8` helps MemCam but not WorldMem. On WorldMem MCE
-   b64 it changed LPIPS only from about 0.596 to 0.598.
-5. Optionally trace K-center and MCE fallback ages to test whether the same
-   long-history fallback mechanism explains their ranking.
+Broad policy development is closed. The locked B32 cross-system roster is:
+
+```text
+worldmem_unbounded_60s_n30
+worldmem_fifo_b32_60s_n30
+worldmem_rarity_irreplaceability_b32_60s_n30
+worldmem_slam_covisibility_b32_60s_n30
+worldmem_kcenter_coreset_b32_60s_n15
+worldmem_mce_b32_60s_n15
+```
+
+Use paper labels `Unbounded`, `FIFO-32`, `Latent-RI-32`,
+`Geometric Coverage-32`, `K-center-32`, and `MCE-32`. Evaluate the first 15
+batch IDs (`0..14`) from every run. Do not replace B32 with each policy's
+test-optimal budget in the cross-system table.
+
+Audit existing videos before generating anything:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+AUDIT_FILTER='worldmem_(unbounded|fifo_b32|rarity_irreplaceability_b32|slam_covisibility_b32|kcenter_coreset_b32|mce_b32)_60s_n(15|30)$' \
+bash scripts/audit_worldmem_memory_policy_runs.sh
+```
+
+Only two additional controlled policies are allowed:
+
+- `rarity_only`: corrected k=3 DINO-cluster rarity
+  `log((N+1)/cluster_size)`, without irreplaceability;
+- `slam_rarity_blend`: independently normalized 0.75 existing Geometric
+  Coverage plus 0.25 DINO-cluster rarity, without RGB irreplaceability.
+
+Both policies enforce `MEMORY_FEATURE_BACKEND=dino`. Run the matched B32
+ablation on CECSL GPU 0; the two resume-aware runs execute sequentially:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+for spec in \
+  'rarity_only|worldmem_rarity_only_b32_60s_n15' \
+  'slam_rarity_blend|worldmem_slam_rarity_b32_s75_r25_k3_60s_n15'
+do
+  IFS='|' read -r policy run_name <<< "$spec"
+  GPU=0 \
+  WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+  WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+  MEMORY_POLICY="$policy" \
+  MEMORY_BUDGET=32 \
+  MEMORY_BANK_DEVICE=cpu \
+  MEMORY_REFERENCE_SOURCE=predicted \
+  MEMORY_FEATURE_BACKEND=dino \
+  MEMORY_FEATURE_DEVICE=auto \
+  RI_RARITY_NEIGHBORS=3 \
+  COVERAGE_RI_COVERAGE_WEIGHT=0.75 \
+  FUTURE_SECONDS=60 \
+  LIMIT_BATCH=15 \
+  GLOBAL_SEED=42 \
+  DATASET_SEED=42 \
+  RUN_NAME="$run_name" \
+  bash scripts/run_worldmem_memory_policy_smoke.sh \
+    2>&1 | tee "/data/ab575577/worldmem/logs/${run_name}_gpu0_$(date +%F_%H%M).log"
+done
+```
+
+These ablations enter the final roster only if they improve the complete metric
+suite, including all six VBench dimensions. LPIPS/FVD alone is insufficient.
+
+For the frozen six-policy table, inspect any existing summaries first, then run
+matched first-15 LPIPS and FVD prefix evaluation. These commands use separate
+`_60s_n15` result directories and preserve the existing FVD configuration:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+LOCKED_RUNS_CSV='worldmem_unbounded_60s_n30,worldmem_fifo_b32_60s_n30,worldmem_rarity_irreplaceability_b32_60s_n30,worldmem_slam_covisibility_b32_60s_n30,worldmem_kcenter_coreset_b32_60s_n15,worldmem_mce_b32_60s_n15'
+
+CUDA_VISIBLE_DEVICES=0 \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS="$LOCKED_RUNS_CSV" \
+LIMIT=15 \
+EVAL_DURATIONS=10,20,30,60 \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/lpips_prefix_60s_n15 \
+bash scripts/evaluate_worldmem_lpips.sh
+
+CUDA_VISIBLE_DEVICES=0 \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS="$LOCKED_RUNS_CSV" \
+LIMIT=15 \
+EVAL_DURATIONS=10,20,30,60 \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/fvd_prefix_60s_n15 \
+bash scripts/evaluate_worldmem_fvd.sh
+```
+
+Evaluate the two controlled rarity ablations in separate metric directories;
+do not merge them into the locked summary until the full suite qualifies them.
+
+The VBench wrappers now stage exactly batch IDs `0..14`, save
+`input_selection.json`, abort on missing batches, and reject stale outputs that
+lack a matching manifest. Run standard VBench first:
+
+```bash
+cd ~/WorldMem
+conda activate vbench
+
+CUDA_VISIBLE_DEVICES=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+LIMIT=15 \
+bash scripts/run_worldmem_vbench.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/vbench_locked_b32_$(date +%F_%H%M).log
+```
+
+An older result produced without `input_selection.json` is intentionally
+rejected. Inspect it first; use `FORCE=1` only when explicitly replacing it
+with the matched first-15 protocol.
+
+Smoke-test VBench-Long on one locked policy before launching the six-run list:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS=worldmem_mce_b32_60s_n15 \
+LIMIT=15 \
+bash scripts/run_worldmem_vbench_long.sh
+```
+
+After verifying six dimensions and 15 source videos, run all locked policies:
+
+```bash
+LOCKED_RUNS='worldmem_unbounded_60s_n30 worldmem_fifo_b32_60s_n30 worldmem_rarity_irreplaceability_b32_60s_n30 worldmem_slam_covisibility_b32_60s_n30 worldmem_kcenter_coreset_b32_60s_n15 worldmem_mce_b32_60s_n15'
+
+CUDA_VISIBLE_DEVICES=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS="$LOCKED_RUNS" \
+LIMIT=15 \
+bash scripts/run_worldmem_vbench_long.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/vbench_long_locked_b32_$(date +%F_%H%M).log
+```
+
+CUT3R remains invalid until its GT Minecraft sanity check passes. Do not create
+`cut3r_camera_metrics_gt_sanity/validity.json` with `{"valid": true}` unless
+the corrected, frozen evaluator has produced sensible GT camera errors.
+
+Build the machine-readable completion table at any point; missing metrics and
+invalid CUT3R are represented explicitly:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/build_worldmem_final_metric_status.sh
+
+python - <<'PY'
+import pandas as pd
+
+path = "/data/ab575577/worldmem/outputs/memory_policy/metrics/final_status/worldmem_final_metric_status.csv"
+print(pd.read_csv(path).to_string(index=False))
+PY
+```
+
+The sidecar JSON records required/selected batch IDs, source paths, protocol,
+and git commit. VBench manifests additionally record dimensions and GPU model.
+On Newton, replace the storage root with `$HOME/worldmem_results` and never use
+`/data/ab575577`.
+
+### Remaining Final Runs
+
+1. Audit the six locked B32 runs and their existing matched first-15 metrics.
+2. Generate only the two permitted controlled rarity ablations.
+3. Complete LPIPS/FVD, standard VBench, and VBench-Long for the locked roster.
+4. Keep CUT3R marked invalid unless the frozen GT sanity evaluator passes.
+5. Once the six-policy matrix is complete, stop policy experiments and move to
+   paper figures and analysis.
 
 ## Common Issues
 

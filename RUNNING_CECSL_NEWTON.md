@@ -1098,6 +1098,39 @@ assets/plots/worldmem_fvd_prefix_60s_n15.png
 assets/plots/worldmem_fvd_prefix_60s_n15.pdf
 ```
 
+For the MemCam-paper-style **memory-budget sweep**, use budgets
+`16,32,64,128` on the x-axis, one line per policy, and Unbounded as a dashed
+horizontal reference. The wrapper evaluates exactly batch IDs `0..14` for
+FIFO, Latent-RI, Geometric Coverage, K-center, and MCE, then plots LPIPS and
+FVD at 60 seconds:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+CUDA_VISIBLE_DEVICES=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/run_worldmem_budget_sweep_metrics.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/worldmem_budget_sweep_$(date +%F_%H%M).log
+```
+
+This is a 21-cell metric sweep: Unbounded plus five bounded policies at four
+budgets. It does not generate videos. It reads the completed rollouts, computes
+matched first-15 prefix metrics, and writes:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/budget_sweep_figures_60s_n15/worldmem_budget_sweep_60s_n15.{png,pdf,csv}
+/data/ab575577/worldmem/outputs/memory_policy/metrics/budget_sweep_figures_60s_n15/worldmem_lpips_vs_budget_60s_n15.{png,pdf}
+/data/ab575577/worldmem/outputs/memory_policy/metrics/budget_sweep_figures_60s_n15/worldmem_fvd_vs_budget_60s_n15.{png,pdf}
+```
+
+The plotter refuses incomplete cells and summaries not computed from exactly 15
+completed videos. To replot existing complete summaries without rerunning
+metrics, set `RUN_LPIPS=0 RUN_FVD=0`. On Newton, use
+`WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results` and never `/data/ab575577`.
+
 For CUT3R camera trajectory metrics, use the MemCam/CUT3R checkout and checkpoint. Start with a smoke subset:
 
 If the CECSL build of CUT3R's `curope` extension fails with

@@ -76,7 +76,7 @@ def parse_prediction_name(path):
     }
 
 
-def list_prediction_videos(run_dir, limit=None):
+def list_prediction_videos(run_dir, limit=None, require_prefix=False):
     videos = {}
     for path in sorted(prediction_dir(run_dir).glob("video_batch*.mp4")):
         parsed = parse_prediction_name(path)
@@ -86,7 +86,17 @@ def list_prediction_videos(run_dir, limit=None):
         videos.setdefault(batch_idx, path)
     items = sorted(videos.items())
     if limit is not None:
-        items = items[: int(limit)]
+        limit = int(limit)
+        if require_prefix:
+            missing = [batch_idx for batch_idx in range(limit) if batch_idx not in videos]
+            if missing:
+                raise RuntimeError(
+                    f"{Path(run_dir).name} is missing required prediction batch IDs: "
+                    f"{missing}"
+                )
+            items = [(batch_idx, videos[batch_idx]) for batch_idx in range(limit)]
+        else:
+            items = items[:limit]
     return items
 
 

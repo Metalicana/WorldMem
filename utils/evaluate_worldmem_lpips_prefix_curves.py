@@ -140,7 +140,11 @@ def compute_lpips_for_run_duration(
     weighted_scores = []
     total_frames = 0
 
-    for batch_idx, pred_path in list_prediction_videos(run_dir, limit=limit):
+    for batch_idx, pred_path in list_prediction_videos(
+        run_dir,
+        limit=limit,
+        require_prefix=limit is not None,
+    ):
         try:
             available_frames = video_frame_count(pred_path)
             num_frames = min(int(duration_frames), available_frames)

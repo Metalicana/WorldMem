@@ -5,6 +5,9 @@ This repository is being inspected from a sandbox where the codebase is not bein
 For a compact project/account handoff, read `PROJECT_HANDOFF_NEW_ACCOUNT.md`
 before using this detailed runbook.
 
+For the consolidated tables, diagnostics, and validity ledger, read
+`WORLDMEM_RESULTS_INVENTORY.md`.
+
 ## Machine Notes
 
 - CECSL PC has the large local data area at `/data/ab575577/`. Keep datasets, model caches, W&B files, checkpoints, and large outputs there.
@@ -1130,6 +1133,43 @@ The plotter refuses incomplete cells and summaries not computed from exactly 15
 completed videos. To replot existing complete summaries without rerunning
 metrics, set `RUN_LPIPS=0 RUN_FVD=0`. On Newton, use
 `WORLDMEM_STORAGE_ROOT=$HOME/worldmem_results` and never `/data/ab575577`.
+
+Observed complete CECSL budget sweep on 2026-09-06, using the first 15 matched
+videos and the 60-second prefix (lower is better):
+
+| Policy | Budget | LPIPS | FVD |
+| --- | ---: | ---: | ---: |
+| Unbounded | - | 0.652269 | 3077.600 |
+| FIFO | 16 | 0.717445 | 4205.032 |
+| FIFO | 32 | 0.688773 | 3554.909 |
+| FIFO | 64 | 0.687605 | 3821.737 |
+| FIFO | 128 | 0.647241 | 2604.960 |
+| Latent-RI | 16 | 0.565720 | 1238.744 |
+| Latent-RI | 32 | 0.545953 | 1160.428 |
+| Latent-RI | 64 | 0.548573 | 1165.354 |
+| Latent-RI | 128 | 0.566730 | 1250.561 |
+| Geometric Coverage | 16 | **0.524506** | **1041.757** |
+| Geometric Coverage | 32 | 0.533678 | 1116.925 |
+| Geometric Coverage | 64 | 0.545439 | 1128.462 |
+| Geometric Coverage | 128 | 0.577360 | 1601.814 |
+| K-center | 16 | 0.544560 | 1166.074 |
+| K-center | 32 | 0.558800 | 1419.579 |
+| K-center | 64 | 0.574565 | 1664.466 |
+| K-center | 128 | 0.558839 | 1533.881 |
+| MCE | 16 | 0.575549 | 1459.740 |
+| MCE | 32 | 0.574797 | 1923.972 |
+| MCE | 64 | 0.595627 | 2258.660 |
+| MCE | 128 | 0.603571 | 2173.207 |
+
+Geometric Coverage B16 improves LPIPS by 0.127763 (19.6%) and FVD by
+2035.843 (66.1%) relative to Unbounded. It is best on both metrics. At the
+fixed B32 cross-system comparison, Geometric Coverage remains best. FIFO is a
+useful negative control: B16/B32/B64 are worse than Unbounded, while FIFO B128
+only narrowly improves LPIPS. Selective policies beat Unbounded at every tested
+budget, but increasing capacity is not monotonic: Geometric Coverage, K-center,
+and MCE generally degrade as their banks expand. Treat these as matched
+within-WorldMem point estimates; FVD magnitude is not directly comparable to
+MemCam or a different evaluator protocol.
 
 For CUT3R camera trajectory metrics, use the MemCam/CUT3R checkout and checkpoint. Start with a smoke subset:
 

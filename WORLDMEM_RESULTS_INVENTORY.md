@@ -1,6 +1,6 @@
 # WorldMem Results Inventory
 
-Updated: 2026-09-09
+Updated: 2026-09-14
 
 This file consolidates the measured WorldMem results currently recorded in the
 repository and CECSL logs. It separates usable paper results from pilots,
@@ -223,14 +223,152 @@ on the broader metric suite.
 | --- | --- |
 | Complete LPIPS budget sweep | Valid, 21 cells, 15 matched videos |
 | Complete FVD budget sweep | Valid, 21 cells, 15 matched videos |
-| Standard VBench | No values recorded in this local handoff |
-| VBench-Long | No values recorded in this local handoff |
+| Standard VBench | Full 21-cell exact-batch evaluator ready; results pending |
+| VBench-Long | Corrected original-video grouping and full 21-cell evaluator ready; results pending |
 | CUT3R generated-video metrics | Invalid: GT Minecraft sanity failed |
 | Pixel revisit metric | Unavailable: zero candidates in selected trajectories |
 | Rarity-only B32 | 15-video generation exists; metrics not recorded here |
 | SLAM-rarity 75/25 B32 | Implementation exists; completion not recorded here |
 | Coverage-Hysteresis B32 | 15-video generation exists; excluded from final roster |
 | RGB memory scaling | Speculative extrapolation, not measured behavior |
+
+## Completing The WorldMem Metric Matrix
+
+The target follows the MemCam budget grid: Unbounded plus FIFO, Latent-RI,
+Geometric Coverage, K-center, and MCE at budgets 16, 32, 64, and 128. Every
+metric uses generated batch IDs 0 through 14, for 21 cells and 315 matched
+policy-video evaluations. Existing extra videos in the older N30 directories
+are excluded by staging.
+
+LPIPS and FVD are already complete. Do not regenerate videos or rerun those
+metrics unless their saved summaries fail the final status audit.
+
+CECSL does not currently have a `vbench` Conda environment. Create it once,
+separately from the working `worldmem` environment. The pinned VBench checkout
+has a stale `setup.py` guard that rejects CUDA newer than 12.1, so do not run
+`pip install .`; the evaluation wrappers execute `evaluate.py` directly.
+
+```bash
+cd ~
+
+if [ ! -d "$HOME/VBench/.git" ]; then
+  git clone https://github.com/Vchitect/VBench.git "$HOME/VBench"
+fi
+
+cd "$HOME/VBench"
+git fetch origin
+git checkout 45e79ec14e69a2187202c675d2dbce1a71843d53
+
+conda create -n vbench python=3.10 pip -y
+conda activate vbench
+
+python -m pip install --upgrade pip wheel
+python -m pip install torch torchvision \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+python -m pip install "moviepy==1.0.3" av \
+  "dreamsim==0.2.1" "peft==0.7.1" "transformers==4.33.2"
+```
+
+DreamSim does not cap PEFT, so an unconstrained install can pull a newer PEFT
+that is incompatible with VBench's pinned `transformers==4.33.2`. If the
+environment already has `peft==0.20.0`, repair it in place with:
+
+```bash
+conda activate vbench
+python -m pip install "peft==0.7.1" "transformers==4.33.2"
+python -m pip check
+```
+
+Verify imports and Blackwell GPU execution before the full evaluation:
+
+```bash
+conda activate vbench
+cd "$HOME/VBench"
+
+python - <<'PY'
+import torch
+import vbench
+import av
+import dreamsim
+from moviepy.editor import VideoFileClip
+
+print("torch:", torch.__version__, "CUDA:", torch.version.cuda)
+print("available:", torch.cuda.is_available())
+print("device:", torch.cuda.get_device_name(0))
+x = torch.ones(1, device="cuda")
+print("CUDA tensor:", x)
+print("VBench imports: OK")
+PY
+```
+
+The wrappers place VBench checkpoints and framework caches under
+`/data/ab575577/worldmem/` on CECSL. Newton automatically uses
+`$HOME/worldmem_results/` instead.
+
+Run standard VBench on CECSL GPU 0:
+
+```bash
+cd ~/WorldMem
+conda activate vbench
+export CUDA_VISIBLE_DEVICES=0
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/run_worldmem_vbench.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/vbench_budget_sweep_60s_n15_$(date +%F_%H%M).log
+```
+
+Smoke-test corrected VBench-Long on Unbounded:
+
+```bash
+cd ~/WorldMem
+conda activate vbench
+export CUDA_VISIBLE_DEVICES=0
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+RUNS=worldmem_unbounded_60s_n30 \
+bash scripts/run_worldmem_vbench_long.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/vbench_long_unbounded_smoke_$(date +%F_%H%M).log
+```
+
+After the smoke succeeds, run the full VBench-Long grid. The completed
+Unbounded cell is verified and skipped:
+
+```bash
+cd ~/WorldMem
+conda activate vbench
+export CUDA_VISIBLE_DEVICES=0
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/run_worldmem_vbench_long.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/vbench_long_budget_sweep_60s_n15_$(date +%F_%H%M).log
+```
+
+After both finish, build the complete machine-readable status table without
+using `column`:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/build_worldmem_final_metric_status.sh
+
+python - <<'PY'
+import pandas as pd
+
+path = "/data/ab575577/worldmem/outputs/memory_policy/metrics/final_status/worldmem_final_metric_status.csv"
+print(pd.read_csv(path).to_string(index=False))
+PY
+```
+
+CUT3R must remain absent/invalid in the final table until the GT Minecraft
+sanity run produces sensible camera errors and writes an explicit passing
+`validity.json`. A completed reconstruction process alone is not evidence that
+the camera metric is valid.
 
 ## CPU-Only Retrieval-Failure Figures
 

@@ -23,8 +23,8 @@
 #   conda activate vbench   # or whatever this machine's VBench env is named
 #   bash scripts/run_worldmem_vbench.sh
 #
-# The default is the frozen six-policy B32 roster, always matched on batch IDs
-# 0..14. Override RUNS only for an explicitly controlled ablation.
+# The default is the complete 21-cell budget sweep, always matched on batch
+# IDs 0..14. Override RUNS for a smoke test or controlled ablation.
 
 set -euo pipefail
 
@@ -40,26 +40,34 @@ fi
 
 VBENCH_ROOT="${VBENCH_ROOT:-$HOME/VBench}"
 RESULTS_ROOT="${RESULTS_ROOT:-$STORAGE_ROOT/outputs/memory_policy}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$RESULTS_ROOT/metrics/vbench_results}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$RESULTS_ROOT/metrics/vbench_budget_sweep_60s_n15}"
+VBENCH_CACHE_DIR="${VBENCH_CACHE_DIR:-$STORAGE_ROOT/vbench_cache}"
+VBENCH_RUNTIME_HOME="${VBENCH_RUNTIME_HOME:-$STORAGE_ROOT/vbench_runtime_home}"
 DIMENSIONS="${DIMENSIONS:-subject_consistency background_consistency motion_smoothness dynamic_degree aesthetic_quality imaging_quality}"
 FORCE="${FORCE:-0}"
 LIMIT="${LIMIT:-15}"
 STAGING_ROOT="${STAGING_ROOT:-$OUTPUT_ROOT/_input_staging}"
 
 RUNS="${RUNS:-worldmem_unbounded_60s_n30 \
-worldmem_fifo_b32_60s_n30 \
-worldmem_rarity_irreplaceability_b32_60s_n30 \
-worldmem_slam_covisibility_b32_60s_n30 \
-worldmem_kcenter_coreset_b32_60s_n15 \
-worldmem_mce_b32_60s_n15}"
+worldmem_fifo_b16_60s_n30 worldmem_fifo_b32_60s_n30 worldmem_fifo_b64_60s_n30 worldmem_fifo_b128_60s_n30 \
+worldmem_rarity_irreplaceability_b16_60s_n30 worldmem_rarity_irreplaceability_b32_60s_n30 worldmem_rarity_irreplaceability_b64_60s_n30 worldmem_rarity_irreplaceability_b128_60s_n30 \
+worldmem_slam_covisibility_b16_60s_n30 worldmem_slam_covisibility_b32_60s_n30 worldmem_slam_covisibility_b64_60s_n30 worldmem_slam_covisibility_b128_60s_n30 \
+worldmem_kcenter_coreset_b16_60s_n15 worldmem_kcenter_coreset_b32_60s_n15 worldmem_kcenter_coreset_b64_60s_n15 worldmem_kcenter_coreset_b128_60s_n15 \
+worldmem_mce_b16_60s_n15 worldmem_mce_b32_60s_n15 worldmem_mce_b64_60s_n15 worldmem_mce_b128_60s_n15}"
 
-mkdir -p "$OUTPUT_ROOT" "$STAGING_ROOT"
+export VBENCH_CACHE_DIR
+export HF_HOME="${HF_HOME:-$STORAGE_ROOT/hf_cache/vbench}"
+export TORCH_HOME="${TORCH_HOME:-$STORAGE_ROOT/torch_cache/vbench}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$VBENCH_RUNTIME_HOME/.cache}"
+mkdir -p "$OUTPUT_ROOT" "$STAGING_ROOT" "$VBENCH_CACHE_DIR" \
+  "$VBENCH_RUNTIME_HOME" "$HF_HOME" "$TORCH_HOME" "$XDG_CACHE_HOME"
 cd "$VBENCH_ROOT"
 
 echo "WorldMem VBench batch eval"
 echo "VBench root: $VBENCH_ROOT"
 echo "Results root: $RESULTS_ROOT"
 echo "Output root: $OUTPUT_ROOT"
+echo "VBench cache: $VBENCH_CACHE_DIR"
 echo "Dimensions: $DIMENSIONS"
 echo "Matched batch limit: $LIMIT"
 echo "Runs: $RUNS"
@@ -101,7 +109,7 @@ for run in $RUNS; do
   fi
 
   echo "[run] $run  ($LIMIT matched videos)  $(date)"
-  python evaluate.py \
+  HOME="$VBENCH_RUNTIME_HOME" python evaluate.py \
     --dimension $DIMENSIONS \
     --videos_path "$stage_dir" \
     --mode custom_input \

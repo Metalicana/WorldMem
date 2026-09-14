@@ -1,4 +1,4 @@
-"""Build the locked six-policy WorldMem metric-completion table."""
+"""Build the matched 21-cell WorldMem metric-completion table."""
 
 import argparse
 import csv
@@ -10,11 +10,20 @@ from pathlib import Path
 
 LOCKED_RUNS = (
     "worldmem_unbounded_60s_n30",
-    "worldmem_fifo_b32_60s_n30",
-    "worldmem_rarity_irreplaceability_b32_60s_n30",
-    "worldmem_slam_covisibility_b32_60s_n30",
-    "worldmem_kcenter_coreset_b32_60s_n15",
-    "worldmem_mce_b32_60s_n15",
+    *(f"worldmem_fifo_b{budget}_60s_n30" for budget in (16, 32, 64, 128)),
+    *(
+        f"worldmem_rarity_irreplaceability_b{budget}_60s_n30"
+        for budget in (16, 32, 64, 128)
+    ),
+    *(
+        f"worldmem_slam_covisibility_b{budget}_60s_n30"
+        for budget in (16, 32, 64, 128)
+    ),
+    *(
+        f"worldmem_kcenter_coreset_b{budget}_60s_n15"
+        for budget in (16, 32, 64, 128)
+    ),
+    *(f"worldmem_mce_b{budget}_60s_n15" for budget in (16, 32, 64, 128)),
 )
 DURATIONS = (10, 20, 30, 60)
 DIMENSIONS = (
@@ -79,14 +88,27 @@ def load_vbench_run(root, run, limit):
     manifest = load_json(manifest_path)
     if manifest.get("selected_batch_ids") != list(range(limit)):
         return {}, None
+    selected = manifest.get("selected_videos")
+    if not isinstance(selected, list) or len(selected) != limit:
+        return {}, None
+    expected_names = {row.get("source_name") for row in selected}
+    if None in expected_names or len(expected_names) != limit:
+        return {}, None
     payload = load_json(result_path)
     scores = {}
     for dimension in DIMENSIONS:
         value = payload.get(dimension)
-        if not isinstance(value, list) or len(value) != 2:
+        if not isinstance(value, list) or len(value) not in (2, 3):
             return {}, None
-        details = value[1]
+        details = value[-1]
         if not isinstance(details, list) or len(details) != limit:
+            return {}, None
+        result_names = {
+            Path(str(detail.get("video_path", ""))).name
+            for detail in details
+            if isinstance(detail, dict)
+        }
+        if result_names != expected_names:
             return {}, None
         scores[dimension] = float(value[0])
     return scores, result_path
@@ -201,7 +223,7 @@ def main():
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(
             {
-                "protocol": "worldmem_locked_b32_first15_v1",
+                "protocol": "worldmem_budget_sweep_first15_v2",
                 "limit": args.limit,
                 "required_batch_ids": required_ids,
                 "git_commit": git_commit(args.repo_root),

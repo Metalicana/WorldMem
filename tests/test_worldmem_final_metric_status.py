@@ -70,11 +70,29 @@ class FinalMetricStatusTest(unittest.TestCase):
             run_dir = Path(directory) / "run"
             run_dir.mkdir()
             (run_dir / "input_selection.json").write_text(
-                json.dumps({"selected_batch_ids": list(range(15))}),
+                json.dumps(
+                    {
+                        "selected_batch_ids": list(range(15)),
+                        "selected_videos": [
+                            {"source_name": f"video_batch{i:05d}_0_rank0.mp4"}
+                            for i in range(15)
+                        ],
+                    }
+                ),
                 encoding="utf-8",
             )
             payload = {
-                dimension: [0.5, [{} for _ in range(15)]]
+                dimension: [
+                    0.5,
+                    [
+                        {
+                            "video_path": (
+                                f"/stage/run/video_batch{i:05d}_0_rank0.mp4"
+                            )
+                        }
+                        for i in range(15)
+                    ],
+                ]
                 for dimension in STATUS.DIMENSIONS
             }
             (run_dir / "results_eval_results.json").write_text(
@@ -88,6 +106,43 @@ class FinalMetricStatusTest(unittest.TestCase):
             )
         self.assertEqual(set(scores), set(STATUS.DIMENSIONS))
         self.assertIsNotNone(source)
+
+    def test_vbench_long_uses_original_video_aggregates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run"
+            run_dir.mkdir()
+            names = [f"video_batch{i:05d}_0_rank0.mp4" for i in range(15)]
+            (run_dir / "input_selection.json").write_text(
+                json.dumps(
+                    {
+                        "selected_batch_ids": list(range(15)),
+                        "selected_videos": [{"source_name": name} for name in names],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = {
+                dimension: [
+                    0.5,
+                    [{"video_path": f"/split/{name}_000.mp4"} for name in names],
+                    [{"video_path": f"/stage/run/{name}"} for name in names],
+                ]
+                for dimension in STATUS.DIMENSIONS
+            }
+            (run_dir / "results_eval_results.json").write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+            scores, source = STATUS.load_vbench_run(
+                Path(directory),
+                "run",
+                limit=15,
+            )
+        self.assertEqual(set(scores), set(STATUS.DIMENSIONS))
+        self.assertIsNotNone(source)
+
+    def test_default_roster_is_complete_budget_grid(self):
+        self.assertEqual(len(STATUS.LOCKED_RUNS), 21)
 
     def test_cut3r_is_ignored_without_validity(self):
         with tempfile.TemporaryDirectory() as directory:

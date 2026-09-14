@@ -33,10 +33,17 @@ def load_latest_eval_results(run_dir):
     return latest, payload
 
 
+def detailed_results(value):
+    if isinstance(value, list) and len(value) in (2, 3) and isinstance(value[-1], list):
+        return value[-1]
+    return None
+
+
 def count_videos_scored(payload):
     for dimension, value in payload.items():
-        if isinstance(value, list) and len(value) == 2 and isinstance(value[1], list):
-            return len(value[1])
+        details = detailed_results(value)
+        if details is not None:
+            return len(details)
     return None
 
 
@@ -66,7 +73,7 @@ def main():
 
         means = {}
         for dimension, value in payload.items():
-            if isinstance(value, list) and len(value) == 2:
+            if isinstance(value, list) and len(value) in (2, 3):
                 means[dimension] = float(value[0])
             elif isinstance(value, (int, float)):
                 means[dimension] = float(value)

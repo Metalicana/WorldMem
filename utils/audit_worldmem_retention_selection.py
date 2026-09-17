@@ -80,8 +80,8 @@ def reconstruct_attempt(attempt, policy, budget, context=600, total=1200, k=8):
     for key, expected in (("context_frames", context), ("n_frames", total), ("memory_condition_length", k), ("batch_size", 1)):
         if int(meta.get(key, -1)) != expected:
             raise ValueError(f"Unexpected {key}: {meta.get(key)}")
-    if meta.get("memory_reference_source") != "predicted":
-        raise ValueError("Memory source is not explicitly predicted")
+    if meta.get("memory_reference_source") not in {None, "predicted"}:
+        raise ValueError("Memory source is explicitly non-predicted")
     if meta.get("retrieval_candidate_cap") not in {None, ""}:
         raise ValueError("Candidate-cap override requires a separately audited eligibility adapter")
     if meta.get("gt_memory_replay_target_frame") not in {None, ""}:
@@ -160,6 +160,22 @@ def reconstruct_attempt(attempt, policy, budget, context=600, total=1200, k=8):
             raise ValueError(f"Repeated selected IDs at target {target}")
         selected[target] = indices
     return snapshots, selected, evictions
+
+
+def choose_attempt(attempts):
+    """Select one unambiguous read stream; completion is a separate audit fact."""
+    if not attempts:
+        raise ValueError("No run_start-scoped attempt found for this trajectory")
+    completed = [attempt for attempt in attempts if attempt["complete"]]
+    if len(completed) > 1:
+        raise ValueError("Multiple completed attempts: video/read-stream association is ambiguous")
+    if completed:
+        if attempts[-1] is not completed[0]:
+            raise ValueError("A later unfinished attempt makes video/read-stream association ambiguous")
+        return completed[0], "end_marker_observed"
+    # Structural validation below still requires every query and every selected slot.
+    # Do not turn this missing marker into an asserted completed generation.
+    return attempts[-1], "end_marker_missing"
 
 
 def audit_cache(path, source_video, source_run, batch):
@@ -260,22 +276,34 @@ def main():
                       "video_present": len(videos[batch]) == 1, "trace_status": "invalid", "queries": 0,
                       "raw_query_coverage": len({str(event.get("target_frame")) for attempt in attempts.get(batch, []) for event in attempt["events"] if event.get("event") == "memory_retrieval" and event.get("target_frame") is not None}),
                       "cache_status": "verified" if batch in cache_records else "missing_or_invalid",
-                      "source_seed_status": "unverified", "dataset_identity_status": "not_logged",
+                      "source_seed_status": "unverified", "policy_generation_seed": "",
+                      "source_generation_seed": source_metadata.get(batch, {}).get("generation_seed"),
+                      "memory_source_status": "unverified", "completion_status": "unverified",
+                      "attempt_count": len(attempts.get(batch, [])), "dataset_identity_status": "not_logged",
                       "checkpoint_config_status": "not_audited", "error": parse_error}
             try:
                 if parse_error:
                     raise ValueError(parse_error)
-                completed = [attempt for attempt in attempts.get(batch, []) if attempt["complete"]]
-                if len(completed) != 1:
-                    raise ValueError(f"Expected one completed attempt; found {len(completed)}")
-                snapshots, selected, _ = reconstruct_attempt(completed[0], policy, budget)
-                meta = completed[0]["metadata"]
+                attempt, completion_status = choose_attempt(attempts.get(batch, []))
+                meta = attempt["metadata"]
+                memory_source_status = (
+                    "unlogged_legacy_metadata"
+                    if meta.get("memory_reference_source") is None
+                    else f"observed_{meta['memory_reference_source']}"
+                )
                 source_seed = source_metadata.get(batch, {}).get("generation_seed")
                 seed = meta.get("generation_seed")
-                seed_status = "matched" if seed is not None and seed == source_seed else "mismatch_or_missing"
-                record.update(trace_status="valid", queries=len(selected), source_seed_status=seed_status, error="")
+                seed_status = (
+                    "missing" if seed is None or source_seed is None
+                    else "matched" if seed == source_seed else "mismatch"
+                )
+                record.update(source_seed_status=seed_status, policy_generation_seed=seed,
+                              memory_source_status=memory_source_status, completion_status=completion_status)
+                snapshots, selected, _ = reconstruct_attempt(attempt, policy, budget)
+                record.update(trace_status="valid", queries=len(selected), error="")
                 manifest = {"run_name": run, "policy": policy, "budget": budget, "trajectory_id": batch,
-                            "trace_metadata": meta, "trace_path": completed[0]["trace"],
+                            "trace_metadata": meta, "trace_path": attempt["trace"],
+                            "memory_source_status": memory_source_status, "completion_status": completion_status,
                             "video_paths": [str(path) for path in videos[batch]],
                             "available_config_paths": [str(path) for path in directory.rglob("config.yaml")],
                             "selected_initial_context_exposures": sum(i < 600 for ids in selected.values() for i in ids),
@@ -301,6 +329,11 @@ def main():
                   ROOT / "algorithms/worldmem/df_video.py", ROOT / "algorithms/worldmem/memory_policies.py",
                   ROOT / "datasets/video/minecraft_video_dataset.py", ROOT / "datasets/video/base_video_dataset.py")},
               "limitations": ["Video existence/nonempty-file checks are not full video decoding.", "Current reader hashes are not historical rollout reader revisions.", "Existing legacy DINO cache arrays retain source/GT separation but processor configuration is represented by its saved hash."],
+              "historical_source_evidence": {
+                  "predicted_only_example_revision": "339722c",
+                  "reference_gather": "xs_pred[random_idx[:, range(xs_pred.shape[1])], range(xs_pred.shape[1])]",
+                  "configurable_source_introduced_revision": "6a33105",
+                  "interpretation": "This establishes legacy predicted-only code behavior, not the exact runtime revision of an unversioned trace. Missing metadata is not silently rewritten. Valid bank/read structure is separate from verified protocol/completion."},
               "cohort": list(range(args.expected_videos)), "query_ids": list(range(600, 1200)),
               "ready_for_analysis": False,
               "remaining_audit": ["Verify actual dataset scene/start identity and checkpoint/config per trajectory; these are not established by the current read trace.", "Resolve source generation-seed mismatches explicitly before claiming a matched source.", "Review coverage.csv for missing/invalid historical bank reconstruction."]}

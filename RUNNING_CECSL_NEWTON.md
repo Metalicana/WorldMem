@@ -2717,3 +2717,19 @@ unverified facts. The default common source is
 `worldmem_memquality_unbounded_60s_n15_seed101`; do not assume it matches the
 main suite's generation seeds. No gap figures are valid until actual scene/start
 and checkpoint/config identity have also been established.
+
+For legacy runs, an absent `memory_reference_source` is reported as
+`unlogged_legacy_metadata`, not treated as a bank-membership failure. Explicit
+non-predicted sources still fail. Complete query coverage without a run-end
+marker is reported as `end_marker_missing`; it does not certify successful
+generation. Missing seeds and observed seed mismatches are separate statuses,
+with both seed values saved in `coverage.csv`.
+
+After updating the code, rerun the audit into a fresh directory:
+
+```bash
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT=/data/ab575577/worldmem/outputs/retention_selection_audits/second_60s_n15 \
+bash scripts/audit_worldmem_retention_selection.sh
+```

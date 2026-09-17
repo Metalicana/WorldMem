@@ -147,9 +147,32 @@ class RetentionSelectionAuditTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 21)
             self.assertEqual(rows[0]["trace_status"], "valid")
-            self.assertEqual(rows[0]["source_seed_status"], "mismatch_or_missing")
+            self.assertEqual(rows[0]["source_seed_status"], "mismatch")
             self.assertEqual(rows[1]["trace_status"], "invalid")
             self.assertFalse(json.loads((output / "audit.json").read_text())["ready_for_analysis"])
+
+    def test_missing_source_field_does_not_destroy_bank_reconstruction(self):
+        attempt = synthetic_attempt()
+        del attempt["metadata"]["memory_reference_source"]
+        banks, _, _ = audit.reconstruct_attempt(attempt, "fifo", 2, 6, 10, 2)
+        self.assertEqual(banks[6], [4, 5])
+        attempt["metadata"]["memory_reference_source"] = "ground_truth"
+        with self.assertRaisesRegex(ValueError, "explicitly non-predicted"):
+            audit.reconstruct_attempt(attempt, "fifo", 2, 6, 10, 2)
+
+    def test_missing_end_marker_is_reported_not_promoted_to_completion(self):
+        attempt = synthetic_attempt()
+        attempt["complete"] = False
+        selected, status = audit.choose_attempt([attempt])
+        self.assertIs(selected, attempt)
+        self.assertEqual(status, "end_marker_missing")
+        banks, _, _ = audit.reconstruct_attempt(selected, "fifo", 2, 6, 10, 2)
+        self.assertEqual(len(banks), 4)
+        completed = synthetic_attempt()
+        with self.assertRaisesRegex(ValueError, "later unfinished"):
+            audit.choose_attempt([completed, attempt])
+        with self.assertRaisesRegex(ValueError, "Multiple completed"):
+            audit.choose_attempt([completed, synthetic_attempt()])
 
 
 if __name__ == "__main__":

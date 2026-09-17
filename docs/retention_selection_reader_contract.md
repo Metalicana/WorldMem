@@ -91,6 +91,21 @@ insufficient. The existing cache stores source and GT in separate named arrays
 within one NPZ; this is an explicitly labeled legacy cache layout.
 
 The tool does not mark analysis ready merely because read reconstruction passes.
+Legacy traces may omit `memory_reference_source`; this does not by itself
+invalidate historical bank IDs. The audit labels the source metadata as
+`unlogged_legacy_metadata` and preserves the original record. Revision `339722c`
+gathers directly from `xs_pred`, and revision `6a33105` introduces the configurable
+source field. This evidence does not identify the runtime revision of each old
+trace, so it is not used to silently assert a missing value. Explicit GT-memory
+mode remains a primary-protocol failure.
+
+An absent `memory_run_end` is reported separately from structural read validity.
+A last attempt with all 600 valid reads can establish bank/read reconstruction
+without asserting that generation completed or that its MP4 association was
+verified. Duplicate completed attempts or a later partial attempt after a
+completed one remain ambiguous and fail audit. Generation seeds are reported
+as matched, mismatched, or missing, rather than combining those cases.
+
 After the real CECSL audit is returned, resolve scene/start/config identities,
 missing traces, seed mismatches and feature compatibility. Missing features call
 for feature extraction, not regeneration. Missing traces need explicit approval

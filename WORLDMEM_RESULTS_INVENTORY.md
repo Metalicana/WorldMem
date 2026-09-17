@@ -1,6 +1,10 @@
 # WorldMem Results Inventory
 
-Updated: 2026-09-14
+Updated: 2026-09-15
+
+Paper: **KEEPSAKE: Selective Spatial Memory for Long-Horizon Video Generation**.
+The final KEEPSAKE method is the SLAM-style Geometric Coverage policy; its
+strongest WorldMem configuration is B16.
 
 This file consolidates the measured WorldMem results currently recorded in the
 repository and CECSL logs. It separates usable paper results from pilots,
@@ -17,7 +21,9 @@ speculative extrapolations, and invalid metrics.
 - LPIPS: frame-aligned generated MP4 versus exact-index dataset GT.
 - FVD: cached StyleGAN-V I3D, 16-frame clips, 4 clips per video, stride 4,
   image size 224.
-- Lower LPIPS and FVD are better.
+- Standard VBench: six prompt-independent dimensions evaluated on exact batch
+  IDs 0 through 14 for every cell.
+- Lower LPIPS and FVD are better. Higher VBench scores are better.
 
 The post-hoc 60-second LPIPS/FVD values are comparable across these WorldMem
 runs, but not directly to MemCam or the original short-horizon WorldMem paper.
@@ -51,6 +57,59 @@ runs, but not directly to MemCam or the original short-horizon WorldMem paper.
 Best overall is Geometric Coverage B16. Relative to Unbounded, it reduces
 LPIPS by 0.127763 (19.6%) and FVD by 2035.843232 (66.1%). At the fixed B32
 cross-system comparison, Geometric Coverage is also best.
+
+## Standard VBench, 15 Matched Videos
+
+| Policy | Budget | Subject | Background | Motion | Dynamic | Aesthetic | Imaging |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Unbounded | - | 0.7387 | 0.8753 | 0.9725 | 0.6667 | 0.3837 | 0.6201 |
+| FIFO | 16 | 0.6842 | 0.8321 | 0.9738 | 0.8000 | 0.3526 | 0.6106 |
+| FIFO | 32 | 0.7247 | 0.8615 | 0.9735 | 0.7333 | 0.3692 | 0.6302 |
+| FIFO | 64 | 0.7350 | 0.8654 | 0.9736 | 0.7333 | 0.3690 | 0.6327 |
+| FIFO | 128 | 0.7617 | 0.8816 | 0.9754 | 0.6000 | 0.3864 | 0.6206 |
+| Latent-RI | 16 | 0.8094 | 0.9295 | 0.9734 | **0.8667** | 0.4332 | **0.6668** |
+| Latent-RI | 32 | 0.8116 | 0.9246 | 0.9750 | **0.8667** | 0.4294 | 0.6493 |
+| Latent-RI | 64 | 0.8027 | 0.9223 | 0.9746 | 0.8000 | 0.4311 | 0.6536 |
+| Latent-RI | 128 | 0.8028 | 0.9224 | 0.9734 | 0.7333 | 0.4293 | 0.6617 |
+| Geometric Coverage | 16 | **0.8230** | **0.9346** | 0.9716 | 0.7333 | **0.4409** | 0.6626 |
+| Geometric Coverage | 32 | 0.8171 | 0.9295 | 0.9739 | 0.7333 | 0.4372 | 0.6598 |
+| Geometric Coverage | 64 | 0.8102 | 0.9192 | 0.9747 | 0.7333 | 0.4286 | 0.6356 |
+| Geometric Coverage | 128 | 0.7941 | 0.9063 | 0.9743 | 0.6667 | 0.4135 | 0.6496 |
+| K-center | 16 | 0.7955 | 0.9156 | 0.9755 | 0.8000 | 0.4218 | 0.6214 |
+| K-center | 32 | 0.7960 | 0.9158 | 0.9739 | 0.7333 | 0.4304 | 0.6338 |
+| K-center | 64 | 0.7956 | 0.9119 | 0.9748 | 0.7333 | 0.4214 | 0.6296 |
+| K-center | 128 | 0.8043 | 0.9189 | 0.9727 | 0.7333 | 0.4246 | 0.6604 |
+| MCE | 16 | 0.7762 | 0.9059 | 0.9750 | 0.7333 | 0.4113 | 0.6311 |
+| MCE | 32 | 0.7912 | 0.9030 | 0.9749 | 0.8000 | 0.4154 | 0.6443 |
+| MCE | 64 | 0.7835 | 0.8990 | 0.9754 | 0.8000 | 0.4027 | 0.6370 |
+| MCE | 128 | 0.7838 | 0.8986 | **0.9764** | 0.8000 | 0.4057 | 0.6310 |
+
+All 21 cells completed with exactly 15 matched videos. Geometric Coverage B16
+is best on subject consistency, background consistency, and aesthetic quality.
+Latent-RI B16/B32 is best on dynamic degree, Latent-RI B16 is best on imaging
+quality, and MCE B128 narrowly leads motion smoothness. Unbounded does not lead
+any measured VBench dimension.
+
+Paper-ready budget-sweep figures are generated from
+`assets/results/worldmem_budget_sweep_60s_n15.csv` with:
+
+```bash
+python utils/plot_worldmem_complete_metric_sweep.py
+```
+
+Outputs in `assets/plots/`:
+
+- `worldmem_lpips_fvd_budget_sweep_60s_n15.{png,pdf}`
+- `worldmem_vbench_budget_sweep_60s_n15.{png,pdf}`
+- `worldmem_vbench_radar_highlights_60s_n15.{png,pdf}`
+- `worldmem_complete_metric_budget_sweep_60s_n15.{png,pdf}`
+
+The radar chart is the cleaner paper-facing VBench summary. It compares
+Unbounded with the strongest Latent-RI and Geometric Coverage configurations.
+Each axis is expressed relative to Unbounded at 100; the radial axis starts at
+90 and should therefore be described as a relative profile, not an absolute
+cross-metric scale. The six-panel line plot remains the complete budget-sweep
+record for the appendix.
 
 ## LPIPS Prefix Curves
 
@@ -223,7 +282,7 @@ on the broader metric suite.
 | --- | --- |
 | Complete LPIPS budget sweep | Valid, 21 cells, 15 matched videos |
 | Complete FVD budget sweep | Valid, 21 cells, 15 matched videos |
-| Standard VBench | Full 21-cell exact-batch evaluator ready; results pending |
+| Standard VBench | Valid, 21 cells, 15 matched videos |
 | VBench-Long | Corrected original-video grouping and full 21-cell evaluator ready; results pending |
 | CUT3R generated-video metrics | Invalid: GT Minecraft sanity failed |
 | Pixel revisit metric | Unavailable: zero candidates in selected trajectories |
@@ -290,12 +349,14 @@ python - <<'PY'
 import torch
 import vbench
 import av
+import decord
 import dreamsim
 from moviepy.editor import VideoFileClip
 
 print("torch:", torch.__version__, "CUDA:", torch.version.cuda)
 print("available:", torch.cuda.is_available())
 print("device:", torch.cuda.get_device_name(0))
+print("decord:", decord.__version__)
 x = torch.ones(1, device="cuda")
 print("CUDA tensor:", x)
 print("VBench imports: OK")
@@ -408,6 +469,22 @@ Default output:
 The output contains combined PNG/PDF figures, individual case strips, complete
 candidate CSVs, selected-case CSVs, and a protocol report. The wrapper sets
 `CUDA_VISIBLE_DEVICES` to empty and imports no Torch models.
+
+For the main paper, use the simpler same-frame KEEPSAKE snowballing figure:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/visualize_worldmem_keepsake_snowballing.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/keepsake_snowballing_4col_$(date +%F_%H%M).log
+```
+
+This produces `Ground truth | Unbounded | FIFO | KEEPSAKE (ours)` using the
+same batch and exact future frame in every column. The five-column selected
+memory figure remains a retrieval-mechanism diagnostic for the supplement.
 
 The original WorldMem paper LPIPS value recorded in the handoff is 0.1429 at
 its short evaluation horizon. It is not directly comparable to this post-hoc

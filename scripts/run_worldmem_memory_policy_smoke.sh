@@ -121,6 +121,7 @@ SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
 RESUME_REQUIRE_METRICS="${RESUME_REQUIRE_METRICS:-false}"
 PROFILE_CUDA_MEMORY="${PROFILE_CUDA_MEMORY:-false}"
 PROFILE_TIMING="${PROFILE_TIMING:-$PROFILE_CUDA_MEMORY}"
+PROFILE_RETRIEVAL_QUERIES="${PROFILE_RETRIEVAL_QUERIES:-false}"
 
 count_completed_batches() {
   local pred_dir="$1"
@@ -224,6 +225,7 @@ cmd=(
   +algorithm.stream_eval_metrics="$STREAM_EVAL_METRICS"
   +algorithm.profile_cuda_memory="$PROFILE_CUDA_MEMORY"
   +algorithm.profile_timing="$PROFILE_TIMING"
+  +algorithm.profile_retrieval_queries="$PROFILE_RETRIEVAL_QUERIES"
   +algorithm.output_batch_offset="$OUTPUT_BATCH_OFFSET"
   +dataset.customized_validation=true
   +algorithm.n_tokens=8
@@ -345,6 +347,7 @@ echo "Compute eval metrics: $COMPUTE_EVAL_METRICS"
 echo "Stream eval metrics: $STREAM_EVAL_METRICS"
 echo "Profile CUDA memory: $PROFILE_CUDA_MEMORY"
 echo "Profile timing: $PROFILE_TIMING"
+echo "Profile retrieval queries: $PROFILE_RETRIEVAL_QUERIES"
 echo "Test num workers: $TEST_NUM_WORKERS"
 echo "PYTORCH_CUDA_ALLOC_CONF: $PYTORCH_CUDA_ALLOC_CONF"
 echo "Decode chunk size: $DECODE_CHUNK_SIZE"

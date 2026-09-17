@@ -437,6 +437,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.access_trace_path = getattr(cfg, "access_trace_path", None)
         self.profile_cuda_memory = getattr(cfg, "profile_cuda_memory", False)
         self.profile_timing = getattr(cfg, "profile_timing", self.profile_cuda_memory)
+        self.profile_retrieval_queries = bool(
+            getattr(cfg, "profile_retrieval_queries", False)
+        )
         self.memory_bank_device = getattr(cfg, "memory_bank_device", "cpu")
         self.memory_reference_source = getattr(cfg, "memory_reference_source", "predicted")
         # MCE's kernel and Q_hist clustering both assume a semantically meaningful
@@ -2862,7 +2865,10 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     if memory_buffers is None
                     else [len(buffer) for buffer in memory_buffers]
                 )
-                if self.profile_timing:
+                profile_this_query = (
+                    self.profile_timing or self.profile_retrieval_queries
+                )
+                if profile_this_query:
                     self._sync_cuda_if_needed()
                     section_start = time.perf_counter()
                 random_idx = self._generate_condition_indices(
@@ -2875,10 +2881,50 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     candidate_indices=candidate_indices,
                     stored_memory_sizes=stored_memory_sizes,
                 )
-                self._record_retrieval_trace(memory_buffers)
-                if self.profile_timing:
+                if profile_this_query:
                     self._sync_cuda_if_needed()
-                    timing["retrieval_seconds"] += time.perf_counter() - section_start
+                    query_seconds = time.perf_counter() - section_start
+                    if self.profile_timing:
+                        timing["retrieval_seconds"] += query_seconds
+                    if self.profile_retrieval_queries:
+                        candidate_counts = [
+                            int(record["candidate_count"])
+                            for record in self._last_retrieval_trace
+                            if int(record.get("context_slot", -1)) == 0
+                        ]
+                        stored_sizes = [
+                            int(record["stored_memory_size"])
+                            for record in self._last_retrieval_trace
+                            if int(record.get("context_slot", -1)) == 0
+                        ]
+                        self._write_access_trace(
+                            {
+                                "event": "retrieval_query_profile",
+                                "target_frame": int(curr_frame),
+                                "rollout_frame": int(
+                                    curr_frame - int(self._current_context_frames or 0)
+                                ),
+                                "generated_seconds": float(
+                                    (curr_frame - int(self._current_context_frames or 0))
+                                    / 10.0
+                                ),
+                                "target_horizon": int(horizon),
+                                "candidate_count": candidate_counts[0],
+                                "stored_memory_size": stored_sizes[0],
+                                "retrieved_memory_count": int(random_idx.shape[0]),
+                                "query_seconds": float(query_seconds),
+                                "query_milliseconds": float(query_seconds * 1000.0),
+                                "timing_scope": "generate_condition_indices",
+                                "cuda_synchronized": bool(torch.cuda.is_available()),
+                                "retrieval_fov_samples": int(self.retrieval_fov_samples),
+                                "cuda_device_name": (
+                                    torch.cuda.get_device_name(torch.cuda.current_device())
+                                    if torch.cuda.is_available()
+                                    else None
+                                ),
+                            }
+                        )
+                self._record_retrieval_trace(memory_buffers)
 
                 memory_source_latents = (
                     xs

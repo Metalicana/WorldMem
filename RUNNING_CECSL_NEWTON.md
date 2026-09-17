@@ -2662,3 +2662,33 @@ python utils/build_worldmem_lookup_work_table.py \
   --window-sec 15 \
   --fov-samples 10000
 ```
+
+## WorldMem Retrieval Latency Table
+
+This publication run measures the native, CUDA-synchronized retrieval routine
+for matched unbounded and KEEPSAKE (`slam_covisibility`, budget 32) rollouts.
+The timer covers `_generate_condition_indices` only: FOV construction,
+candidate scoring, and eight-frame greedy selection. It excludes encoding,
+diffusion sampling, decoding, video I/O, and memory-bank updates.
+
+On CECSL GPU 0:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=15 \
+bash scripts/run_worldmem_retrieval_latency.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/worldmem_retrieval_latency_gpu0_$(date +%F_%H%M).log
+```
+
+The run is resumable. The summarizer accepts only completed trajectory attempts
+with exactly 600 profiled queries and eight retrieved memories per query. Output:
+
+```text
+/data/ab575577/worldmem/outputs/retrieval_latency_60s_n15/summary/worldmem_retrieval_latency.csv
+```

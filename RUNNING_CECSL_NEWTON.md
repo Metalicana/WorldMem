@@ -2692,3 +2692,28 @@ with exactly 600 profiled queries and eight retrieved memories per query. Output
 ```text
 /data/ab575577/worldmem/outputs/retrieval_latency_60s_n15/summary/worldmem_retrieval_latency.csv
 ```
+
+## Retention and Selection Gap Input Audit
+
+This is separate from latency and retrieval deterioration. Audit the full
+21-configuration suite before computing common-source best-eight gaps.
+Reader contract and limitations: `docs/retention_selection_reader_contract.md`.
+The command uses CPU only and never launches generation or DINO extraction:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+OUTPUT=/data/ab575577/worldmem/outputs/retention_selection_audits/first_60s_n15 \
+bash scripts/audit_worldmem_retention_selection.sh
+```
+
+Use a new/empty `OUTPUT` directory for each audit. `coverage.csv` lists every
+run/trajectory, including missing/invalid banks, query coverage, source seed
+status, and cache status. `audit.json` preserves identities, hashes and
+unverified facts. The default common source is
+`worldmem_memquality_unbounded_60s_n15_seed101`; do not assume it matches the
+main suite's generation seeds. No gap figures are valid until actual scene/start
+and checkpoint/config identity have also been established.

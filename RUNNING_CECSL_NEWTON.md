@@ -2613,3 +2613,34 @@ On Newton, replace the storage root with `$HOME/worldmem_results` and never use
 - Dataset has zero samples: check that `training`, `validation`, and `test` contain `.mp4` files, and that every video has a matching `.npz` action/pose file.
 - W&B entity error: pass `wandb.entity=local` for offline tests or set your real W&B entity for online logging.
 - Interrupted Hugging Face download keeps waiting on `.lock` files: find the old downloader with `pgrep -af 'hf download|huggingface-cli|snapshot_download|huggingface_hub'`, stop it with `kill <PID>`, then use `kill -9 <PID>` only if it ignores the first kill. After no downloader remains, remove stale lock files with `find /data/ab575577/worldmem/data/minecraft/.cache/huggingface/download -name '*.lock' -type f -delete`.
+## Retrieval Deterioration Diagnostic
+
+This diagnostic uses the completed traced unbounded 60-second run to measure
+whether selected memory deteriorates over rollout time. It does not regenerate
+videos and is not a causal intervention. The exporter uses DINO on GPU for exact
+GT frames and saved-MP4 proxies of generated latent memories; aggregation and
+plotting then run CPU-only. One WorldMem read selects eight discrete memories,
+so the selected statistic is their uniform mean. Both best-single and matched
+best-eight eligible-history oracles are reported.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+QUALITY_ROOT=/data/ab575577/worldmem/outputs/memory_quality_60s \
+LIMIT=15 \
+bash scripts/run_worldmem_retrieval_deterioration.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/retrieval_deterioration_$(date +%F_%H%M).log
+```
+
+The run is feature-cache aware. Its main outputs are:
+
+```text
+/data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/tables/query_decomposition.csv
+/data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/figure/retrieval_deterioration.png
+/data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/figure/changes.csv
+```

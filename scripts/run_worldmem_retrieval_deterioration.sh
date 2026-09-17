@@ -65,6 +65,17 @@ CUDA_VISIBLE_DEVICES="" python utils/plot_worldmem_retrieval_deterioration.py \
   --seed 0 \
   --overwrite
 
+CUDA_VISIBLE_DEVICES="" python utils/build_worldmem_lookup_work_table.py \
+  --input "$TABLE_DIR/query_decomposition.csv" \
+  --output-dir "$TABLE_DIR" \
+  --run-name "$RUN_NAME" \
+  --duration-sec 60 \
+  --expected-videos "$LIMIT" \
+  --fps 10 \
+  --window-sec 15 \
+  --fov-samples 10000
+
 echo "Done."
 echo "Figure: $FIGURE_DIR/retrieval_deterioration.png"
 echo "Changes: $FIGURE_DIR/changes.csv"
+echo "Lookup table: $TABLE_DIR/lookup_work.tex"

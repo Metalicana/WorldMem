@@ -2643,4 +2643,22 @@ The run is feature-cache aware. Its main outputs are:
 /data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/tables/query_decomposition.csv
 /data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/figure/retrieval_deterioration.png
 /data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/figure/changes.csv
+/data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/tables/lookup_work.tex
+```
+
+After the DINO run has completed, rebuild only the lookup-work table on CPU with:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+python utils/build_worldmem_lookup_work_table.py \
+  --input /data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/tables/query_decomposition.csv \
+  --output-dir /data/ab575577/worldmem/outputs/memory_quality_60s/metrics/retrieval_deterioration_unbounded_60s/tables \
+  --run-name worldmem_memquality_unbounded_60s_n15_seed101 \
+  --duration-sec 60 \
+  --expected-videos 15 \
+  --fps 10 \
+  --window-sec 15 \
+  --fov-samples 10000
 ```

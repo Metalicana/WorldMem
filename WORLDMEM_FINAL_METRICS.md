@@ -111,3 +111,43 @@ Outputs in `assets/plots/metric_bars/`, with PNG/PDF exports:
 
 These views do not replace the complete numeric table or establish statistical
 significance. VBench percent scaling is only a display-unit change.
+
+## Retrieval Latency Column
+
+Use a separate matched CPU-bank latency cohort for all six B32 table rows.
+The reported main-table quantity is the equal-weight trajectory mean over all
+600 synchronized retrieval queries per completed rollout. Encoding, denoising,
+decoding, bank updates, and latent gathering/transfer are excluded. This is not
+end-to-end latency. Native candidate scoring uses 10,000 FOV samples; the
+generator receives eight memories. The roster reader verifies these settings,
+logged per-trajectory generation seeds, candidate counts, and GPU model.
+
+Run on an idle CECSL GPU after pulling the updated code:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=0 \
+CUDA_VISIBLE_DEVICES=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=15 \
+GLOBAL_SEED=101 \
+DATASET_SEED=42 \
+bash scripts/run_worldmem_retrieval_latency_roster.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/retrieval_latency_roster_gpu0_$(date +%F_%H%M).log
+```
+
+This profiles 90 new rollouts (six configurations, 15 each), approximately
+18 hours at the previously observed 12-minute/video rate. `NUM_VIDEOS=1`
+provides a six-rollout pilot, not the final 15-video measurement. Existing
+quality runs are not overwritten. Video-based resumption is available, but a
+video without its completed 600-query profile does not satisfy the summarizer.
+
+Main-table output:
+`/data/ab575577/worldmem/outputs/retrieval_latency_roster_60s_n15/summary/worldmem_retrieval_latency_main.csv`.
+The same directory includes early/late windows and a protocol record. On
+Newton omit the CECSL storage override or set an appropriate cluster path;
+the default storage root is `$HOME/worldmem_results`.

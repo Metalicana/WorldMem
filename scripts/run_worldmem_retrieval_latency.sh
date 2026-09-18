@@ -14,10 +14,12 @@ NUM_VIDEOS="${NUM_VIDEOS:-15}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$STORAGE_ROOT/outputs/retrieval_latency_60s_n${NUM_VIDEOS}}"
 GLOBAL_SEED="${GLOBAL_SEED:-101}"
 DATASET_SEED="${DATASET_SEED:-42}"
+POLICY_SPECS="${POLICY_SPECS:-unbounded: slam_covisibility:32}"
+read -r -a specs <<< "$POLICY_SPECS"
 
 mkdir -p "$OUTPUT_ROOT" "$STORAGE_ROOT/logs"
 
-for spec in "unbounded:" "slam_covisibility:32"; do
+for spec in "${specs[@]}"; do
   policy="${spec%%:*}"
   budget="${spec#*:}"
   budget_tag=""
@@ -34,6 +36,7 @@ for spec in "unbounded:" "slam_covisibility:32"; do
   MEMORY_BUDGET="$budget" \
   MEMORY_BANK_DEVICE=cpu \
   MEMORY_REFERENCE_SOURCE=predicted \
+  MEMORY_FEATURE_BACKEND=latent \
   GLOBAL_SEED="$GLOBAL_SEED" \
   GENERATION_SEED="$GLOBAL_SEED" \
   MEMORY_POLICY_SEED="$GLOBAL_SEED" \
@@ -55,6 +58,16 @@ for spec in "unbounded:" "slam_covisibility:32"; do
   WANDB_MODE=disabled \
   bash "$SCRIPT_DIR/run_worldmem_memory_policy_smoke.sh"
 done
+
+if [ "${SUMMARIZE_ALL_POLICIES:-false}" = "true" ]; then
+  CUDA_VISIBLE_DEVICES="" PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  python -m utils.summarize_worldmem_retrieval_latency_roster \
+    --output-root "$OUTPUT_ROOT" \
+    --expected-videos "$NUM_VIDEOS" \
+    --seed "$GLOBAL_SEED" \
+    --policy-specs "$POLICY_SPECS"
+  exit 0
+fi
 
 unbounded_name="worldmem_retrieval_latency_unbounded_60s_n${NUM_VIDEOS}_seed${GLOBAL_SEED}"
 keepsake_name="worldmem_retrieval_latency_slam_covisibility_b32_60s_n${NUM_VIDEOS}_seed${GLOBAL_SEED}"

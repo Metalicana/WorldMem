@@ -10,6 +10,11 @@ This file consolidates the measured WorldMem results currently recorded in the
 repository and CECSL logs. It separates usable paper results from pilots,
 speculative extrapolations, and invalid metrics.
 
+The consolidated final quality table is in
+[WORLDMEM_FINAL_METRICS.md](WORLDMEM_FINAL_METRICS.md). Final metric scope
+(2026-09-18): LPIPS, FVD, and standard VBench. VBench-Long is excluded by
+request; its historical setup instructions below are not a pending requirement.
+
 ## Evaluation Protocol
 
 - Dataset: WorldMem Minecraft test split.

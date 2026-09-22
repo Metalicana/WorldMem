@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "dataset": "zeqixiao/worldmem_minecraft_dataset",
+  "split": "test",
+  "source_fps": 10,
+  "source_start_inclusive": 100,
+  "source_end_exclusive": 1300,
+  "observed_start_inclusive": 100,
+  "observed_end_exclusive": 700,
+  "target_start_inclusive": 700,
+  "target_end_exclusive": 1300,
+  "generated_frames": 600,
+  "evaluation_fps": 10,
+  "trajectories": [
+    {"trajectory_id": 0, "relative_mp4": "val_savanna/3/000041.mp4", "relative_npz": "val_savanna/3/000041.npz"},
+    {"trajectory_id": 1, "relative_mp4": "val_desert/3/000029.mp4", "relative_npz": "val_desert/3/000029.npz"},
+    {"trajectory_id": 2, "relative_mp4": "val_desert/0/000033.mp4", "relative_npz": "val_desert/0/000033.npz"},
+    {"trajectory_id": 3, "relative_mp4": "val_savanna/1/000039.mp4", "relative_npz": "val_savanna/1/000039.npz"},
+    {"trajectory_id": 4, "relative_mp4": "val_iceplains/0/000028.mp4", "relative_npz": "val_iceplains/0/000028.npz"},
+    {"trajectory_id": 5, "relative_mp4": "val_desert/3/000035.mp4", "relative_npz": "val_desert/3/000035.npz"},
+    {"trajectory_id": 6, "relative_mp4": "val_plains/0/000004.mp4", "relative_npz": "val_plains/0/000004.npz"},
+    {"trajectory_id": 7, "relative_mp4": "val_iceplains/3/000010.mp4", "relative_npz": "val_iceplains/3/000010.npz"},
+    {"trajectory_id": 8, "relative_mp4": "val_savanna/0/000017.mp4", "relative_npz": "val_savanna/0/000017.npz"},
+    {"trajectory_id": 9, "relative_mp4": "val_desert/0/000038.mp4", "relative_npz": "val_desert/0/000038.npz"},
+    {"trajectory_id": 10, "relative_mp4": "val_iceplains/0/000011.mp4", "relative_npz": "val_iceplains/0/000011.npz"},
+    {"trajectory_id": 11, "relative_mp4": "val_iceplains/1/000041.mp4", "relative_npz": "val_iceplains/1/000041.npz"},
+    {"trajectory_id": 12, "relative_mp4": "val_plains/0/000002.mp4", "relative_npz": "val_plains/0/000002.npz"},
+    {"trajectory_id": 13, "relative_mp4": "val_iceplains/1/000026.mp4", "relative_npz": "val_iceplains/1/000026.npz"},
+    {"trajectory_id": 14, "relative_mp4": "val_desert/2/000028.mp4", "relative_npz": "val_desert/2/000028.npz"}
+  ],
+  "identity_note": "The target session must hash the resolved MP4/NPZ files and preserve those hashes in its run manifest. Do not substitute another trajectory on decode failure."
+}

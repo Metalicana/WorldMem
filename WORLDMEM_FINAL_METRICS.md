@@ -114,13 +114,29 @@ significance. VBench percent scaling is only a display-unit change.
 
 ## Retrieval Latency Column
 
-Use a separate matched CPU-bank latency cohort for all six B32 table rows.
+The separate matched CPU-bank latency pilot completed for all six B32 table rows.
 The reported main-table quantity is the equal-weight trajectory mean over all
 600 synchronized retrieval queries per completed rollout. Encoding, denoising,
 decoding, bank updates, and latent gathering/transfer are excluded. This is not
 end-to-end latency. Native candidate scoring uses 10,000 FOV samples; the
 generator receives eight memories. The roster reader verifies these settings,
 logged per-trajectory generation seeds, candidate counts, and GPU model.
+
+| Model | Stored items at rollout end | Retrieval ms/query |
+| --- | ---: | ---: |
+| WorldMem | 1,200 | 77.921 |
+| WorldMem + FIFO B32 | 32 | 4.670 |
+| WorldMem + MCE B32 | 32 | 4.708 |
+| WorldMem + K-center B32 | 32 | 5.004 |
+| WorldMem + RI B32 | 32 | 4.638 |
+| WorldMem + KEEPSAKE B32 | 32 | **4.541** |
+
+Latency is measured from one matched trajectory per method (`n=1`), with 600
+queries per trajectory. The brackets printed by the summarizer are degenerate
+for `n=1` and must not be presented as confidence intervals. The 600 queries are
+repeated measurements within one trajectory, not 600 independent trajectories.
+Relative to unbounded WorldMem, KEEPSAKE reduces mean retrieval latency by
+94.2% (17.2x speedup) in this pilot.
 
 Run on an idle CECSL GPU after pulling the updated code:
 
@@ -140,11 +156,11 @@ bash scripts/run_worldmem_retrieval_latency_roster.sh \
   2>&1 | tee /data/ab575577/worldmem/logs/retrieval_latency_roster_gpu0_$(date +%F_%H%M).log
 ```
 
-This profiles 90 new rollouts (six configurations, 15 each), approximately
-18 hours at the previously observed 12-minute/video rate. `NUM_VIDEOS=1`
-provides a six-rollout pilot, not the final 15-video measurement. Existing
-quality runs are not overwritten. Video-based resumption is available, but a
-video without its completed 600-query profile does not satisfy the summarizer.
+With `NUM_VIDEOS=1`, this profiles six rollouts and produces the pilot reported
+above. Increasing `NUM_VIDEOS` produces a trajectory-level uncertainty estimate.
+Existing quality runs are not overwritten. Video-based resumption is available,
+but a video without its completed 600-query profile does not satisfy the
+summarizer.
 
 Main-table output:
 `/data/ab575577/worldmem/outputs/retrieval_latency_roster_60s_n15/summary/worldmem_retrieval_latency_main.csv`.

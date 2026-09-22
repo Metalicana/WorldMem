@@ -2733,3 +2733,36 @@ WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
 OUTPUT=/data/ab575577/worldmem/outputs/retention_selection_audits/second_60s_n15 \
 bash scripts/audit_worldmem_retention_selection.sh
 ```
+
+### Compute the WorldMem retention-selection figure
+
+This is a cached-feature, CPU-only analysis. WorldMem retrieves eight distinct
+frames, so it compares the mean distance of the best eight full-history items,
+the best eight retained items, and the eight items actually selected. It does
+not use MemCam's single-frame minimum.
+
+Run the strict 15-trajectory analysis after the audit reports valid banks and
+reads for all configurations:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+UNBOUNDED_TRACE_ROOT=/data/ab575577/worldmem/outputs/memory_quality_60s/worldmem_memquality_unbounded_60s_n15_seed101 \
+OUTPUT=/data/ab575577/worldmem/outputs/retention_selection_60s_n15/final_$(date +%F_%H%M) \
+bash scripts/analyze_worldmem_retention_selection.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/retention_selection_60s_n15_$(date +%F_%H%M).log
+```
+
+The explicit `UNBOUNDED_TRACE_ROOT` uses the common-source Unbounded rollout's
+own complete 15-trajectory reads; the older primary Unbounded directory has only
+five complete legacy traces. This substitution is recorded in `coverage.csv`
+and `provenance.json`. The strict command stops before scoring if any requested
+configuration lacks one of the 15 traces. For diagnosis only,
+`ALLOW_INCOMPLETE_COHORT=1` computes the exact
+intersection and records it in `provenance.json`; do not present that pilot as
+the complete 15-video result. Outputs include query and trajectory tables,
+trajectory-bootstrap summaries, a MemCam-style budget landscape, and a B32
+stacked decomposition under `figures/`.

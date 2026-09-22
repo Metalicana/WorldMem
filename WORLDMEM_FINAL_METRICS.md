@@ -25,7 +25,12 @@ LPIPS and FVD: lower is better. All VBench dimensions: higher is better.
 Subject = subject consistency; Background = background consistency;
 Motion = motion smoothness; Dynamic = dynamic degree;
 Aesthetic = aesthetic quality; Imaging = imaging quality.
-VBench scores remain on their recorded 0-1 scale. No composite score is inferred.
+VBench dimensions remain on their recorded 0-1 scale. `VBench-6` is a derived
+custom-input aggregate: each of the six available dimensions is normalized with
+the VBench leaderboard bounds, Dynamic receives weight 0.5, the other dimensions
+receive weight 1.0, and the weighted sum is divided by 5.5. It is not the full
+official VBench Quality or Total Score because temporal flickering and the
+semantic dimensions were not evaluated.
 
 | Policy | Budget | Videos | LPIPS | FVD | Subject | Background | Motion | Dynamic | Aesthetic | Imaging |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -50,6 +55,33 @@ VBench scores remain on their recorded 0-1 scale. No composite score is inferred
 | MCE | 32 | 15 | 0.574797 | 1923.971752 | 0.7912 | 0.9030 | 0.9749 | 0.8000 | 0.4154 | 0.6443 |
 | MCE | 64 | 15 | 0.595627 | 2258.660089 | 0.7835 | 0.8990 | 0.9754 | 0.8000 | 0.4027 | 0.6370 |
 | MCE | 128 | 15 | 0.603571 | 2173.207329 | 0.7838 | 0.8986 | 0.9764 | 0.8000 | 0.4057 | 0.6310 |
+
+## VBench-6 Main-Table Aggregate
+
+These values use the recorded B32 dimension means above. Recalculate from the
+raw CECSL result JSONs for the final paper values so rounding in the recorded
+four-decimal CSV cannot affect the last displayed decimal.
+
+| Model | VBench-6 (%) |
+| --- | ---: |
+| WorldMem | 68.66 |
+| WorldMem + FIFO B32 | 68.61 |
+| WorldMem + MCE B32 | 72.84 |
+| WorldMem + K-center B32 | 72.67 |
+| **WorldMem + RI B32** | **74.77** |
+| WorldMem + KEEPSAKE B32 | 74.05 |
+
+Recalculate and export from the matched raw VBench outputs on CECSL:
+
+```bash
+cd ~/WorldMem
+conda activate vbench
+
+python utils/calculate_worldmem_vbench6.py \
+  --root /data/ab575577/worldmem/outputs/memory_policy/metrics/vbench_budget_sweep_60s_n15 \
+  --limit 15 \
+  --output /data/ab575577/worldmem/outputs/memory_policy/metrics/vbench_budget_sweep_60s_n15/worldmem_vbench6_main.csv
+```
 
 ## Reading the Results
 

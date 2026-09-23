@@ -2801,3 +2801,81 @@ Outputs:
 Each directory contains `per_video.csv`, `dimension_contributions.csv`,
 `summary.csv`, and `summary.json`. The N=30 result is a fixed matched-prefix
 robustness comparison; do not stop or select a prefix based on which method wins.
+
+## Matched Long-Horizon WorldMem FID
+
+The command below evaluates the six locked B32 methods against exact-index raw
+dataset frames, using one shared deterministic sample of 5,000 frames from the
+same 15 trajectories. The generated and GT index pairing is written to
+`frame_sampling_plan.json`. This is the long-horizon extension used for the
+60-second policy comparison. WorldMem's released native rFID path instead uses
+VAE-reconstructed GT; use the native launcher in the following section when
+claiming direct comparability to the paper's benchmark.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+CUDA_VISIBLE_DEVICES=1 \
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+METRICS_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/rfid_60s_n15 \
+bash scripts/evaluate_worldmem_rfid.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/rfid_60s_n15_gpu1_$(date +%F_%H%M).log
+```
+
+Print the completed table without `column`:
+
+```bash
+python - <<'PY'
+import pandas as pd
+
+path = "/data/ab575577/worldmem/outputs/memory_policy/metrics/rfid_60s_n15/summary.csv"
+df = pd.read_csv(path)
+print(df[["policy_label", "videos", "frames", "rfid"]].sort_values("rfid").to_string(index=False))
+PY
+```
+
+## Native WorldMem Beyond-Context Evaluation
+
+The released WorldMem evaluation initializes a 600-frame memory bank, uses an
+8-frame generator context and 8 retrieved memory frames, and generates the next
+100 frames with 20 sampling steps. PSNR and LPIPS compare predictions with the
+exact-index ground truth after the same VAE reconstruction path. The released
+`evaluate.sh` defaults to 10 videos; the README's FID result uses 5,000 frames,
+which requires 50 videos at 100 generated frames each.
+
+Run a matched released-protocol comparison between native unbounded WorldMem
+and KEEPSAKE B32 on GPU 1:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+CUDA_VISIBLE_DEVICES=1 \
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+NUM_VIDEOS=10 \
+KEEPSAKE_BUDGET=32 \
+bash scripts/run_worldmem_native_eval_pair.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/native_worldmem_keepsake_n10_gpu1_$(date +%F_%H%M).log
+```
+
+For the released README's 5,000-frame reconstruction-FID scale, rerun with
+`NUM_VIDEOS=50`. The launcher fixes both dataset and generation seeds to 42,
+saves VAE-reconstructed GT videos, computes native PSNR/LPIPS online, runs the
+released `calculate_fid.py` against one shared GT directory, and writes:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/native_worldmem_10s_n10/summary.csv
+/data/ab575577/worldmem/outputs/memory_policy/metrics/native_worldmem_10s_n10/summary.json
+```
+
+The paper describes a larger 300-video benchmark and 4,800 rFID frames, while
+the released README currently states 5,000 FID frames and its shell script
+defaults to 10 videos. Keep the chosen cohort size explicit when reporting the
+result; do not mix these scales in one table.

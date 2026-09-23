@@ -2766,3 +2766,38 @@ intersection and records it in `provenance.json`; do not present that pilot as
 the complete 15-video result. Outputs include query and trajectory tables,
 trajectory-bootstrap summaries, a MemCam-style budget landscape, and a B32
 stacked decomposition under `figures/`.
+
+## Paired VBench-6 Recalculation for RI and KEEPSAKE
+
+This first computes paired video-level uncertainty from the existing matched
+15-video VBench outputs, then evaluates the already generated first 30 videos
+for RI B32 and KEEPSAKE B32 and repeats the paired analysis. It does not generate
+new videos. Imaging-quality details are converted from VBench's per-video 0-100
+scale to its aggregate 0-1 scale before applying the normalized weighted score.
+Dynamic Degree remains binary per video. This custom `VBench-6` aggregate is not
+the full official VBench score.
+
+Run in the CECSL VBench environment on an available GPU:
+
+```bash
+cd ~/WorldMem
+conda activate vbench
+mkdir -p /data/ab575577/worldmem/logs
+export CUDA_VISIBLE_DEVICES=0
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/recalculate_worldmem_vbench6_ri_keepsake.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/vbench6_ri_keepsake_n30_$(date +%F_%H%M).log
+```
+
+Outputs:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/vbench6_paired/n15/
+/data/ab575577/worldmem/outputs/memory_policy/metrics/vbench6_paired/n30/
+```
+
+Each directory contains `per_video.csv`, `dimension_contributions.csv`,
+`summary.csv`, and `summary.json`. The N=30 result is a fixed matched-prefix
+robustness comparison; do not stop or select a prefix based on which method wins.

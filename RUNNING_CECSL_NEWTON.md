@@ -2845,7 +2845,10 @@ The released WorldMem evaluation initializes a 600-frame memory bank, uses an
 100 frames with 20 sampling steps. PSNR and LPIPS compare predictions with the
 exact-index ground truth after the same VAE reconstruction path. The released
 `evaluate.sh` defaults to 10 videos; the README's FID result uses 5,000 frames,
-which requires 50 videos at 100 generated frames each.
+which requires 50 videos at 100 generated frames each. The final paper states
+that its Minecraft settings are evaluated on 300 test videos. Therefore the
+paper-scale reproduction uses all 300 videos for PSNR/LPIPS and the released
+5,000-frame (50-video) FID computation.
 
 Run a matched released-protocol comparison between native unbounded WorldMem
 and KEEPSAKE B32 on GPU 1:
@@ -2875,7 +2878,19 @@ released `calculate_fid.py` against one shared GT directory, and writes:
 /data/ab575577/worldmem/outputs/memory_policy/metrics/native_worldmem_10s_n10/summary.json
 ```
 
-The paper describes a larger 300-video benchmark and 4,800 rFID frames, while
-the released README currently states 5,000 FID frames and its shell script
-defaults to 10 videos. Keep the chosen cohort size explicit when reporting the
-result; do not mix these scales in one table.
+The final paper specifies a 300-video Minecraft benchmark but does not state a
+separate rFID frame count in its main evaluation text. The released README
+states 5,000 FID frames, while its shell script defaults to 10 videos. Keep the
+chosen cohort size explicit when reporting the result; do not mix these scales
+in one table.
+
+For the closest reproducible paper-scale run, use `PAPER_PROTOCOL=1`. This
+enforces 300 videos for PSNR/LPIPS and 50 videos (5,000 frames) for rFID:
+
+```bash
+PAPER_PROTOCOL=1 \
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/run_worldmem_native_eval_pair.sh
+```

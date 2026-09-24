@@ -12,14 +12,20 @@ fi
 GPU="${GPU:-0}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-$GPU}"
 
-NUM_VIDEOS="${NUM_VIDEOS:-10}"
+PAPER_PROTOCOL="${PAPER_PROTOCOL:-0}"
+if [ "$PAPER_PROTOCOL" = "1" ]; then
+  NUM_VIDEOS="${NUM_VIDEOS:-300}"
+  RFID_MAX_VIDEOS="${RFID_MAX_VIDEOS:-50}"
+else
+  NUM_VIDEOS="${NUM_VIDEOS:-10}"
+  RFID_MAX_VIDEOS="${RFID_MAX_VIDEOS:-}"
+fi
 KEEPSAKE_BUDGET="${KEEPSAKE_BUDGET:-32}"
 DATASET_SEED="${DATASET_SEED:-42}"
 GLOBAL_SEED="${GLOBAL_SEED:-42}"
 RUN_UNBOUNDED="${RUN_UNBOUNDED:-1}"
 RUN_KEEPSAKE="${RUN_KEEPSAKE:-1}"
 RUN_RFID="${RUN_RFID:-1}"
-RFID_MAX_VIDEOS="${RFID_MAX_VIDEOS:-$NUM_VIDEOS}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$STORAGE_ROOT/outputs/memory_policy}"
 METRICS_DIR="${METRICS_DIR:-$OUTPUT_ROOT/metrics/native_worldmem_10s_n${NUM_VIDEOS}}"
 
@@ -29,8 +35,22 @@ KEEPSAKE_RUN="${KEEPSAKE_RUN:-worldmem_native_keepsake_b${KEEPSAKE_BUDGET}_10s_n
 case "$NUM_VIDEOS" in
   ''|*[!0-9]*) echo "NUM_VIDEOS must be a positive integer" >&2; exit 2 ;;
 esac
+case "$PAPER_PROTOCOL" in
+  0|1) ;;
+  *) echo "PAPER_PROTOCOL must be 0 or 1" >&2; exit 2 ;;
+esac
 case "$KEEPSAKE_BUDGET" in
   ''|*[!0-9]*) echo "KEEPSAKE_BUDGET must be a positive integer" >&2; exit 2 ;;
+esac
+if [ -z "$RFID_MAX_VIDEOS" ]; then
+  if [ "$NUM_VIDEOS" -lt 50 ]; then
+    RFID_MAX_VIDEOS="$NUM_VIDEOS"
+  else
+    RFID_MAX_VIDEOS=50
+  fi
+fi
+case "$RFID_MAX_VIDEOS" in
+  ''|*[!0-9]*) echo "RFID_MAX_VIDEOS must be a positive integer" >&2; exit 2 ;;
 esac
 if [ "$NUM_VIDEOS" -lt 1 ] || [ "$KEEPSAKE_BUDGET" -lt 1 ]; then
   echo "NUM_VIDEOS and KEEPSAKE_BUDGET must be positive" >&2
@@ -38,6 +58,10 @@ if [ "$NUM_VIDEOS" -lt 1 ] || [ "$KEEPSAKE_BUDGET" -lt 1 ]; then
 fi
 if [ "$RFID_MAX_VIDEOS" -gt "$NUM_VIDEOS" ]; then
   echo "RFID_MAX_VIDEOS cannot exceed NUM_VIDEOS" >&2
+  exit 2
+fi
+if [ "$PAPER_PROTOCOL" = "1" ] && { [ "$NUM_VIDEOS" -ne 300 ] || [ "$RFID_MAX_VIDEOS" -ne 50 ]; }; then
+  echo "PAPER_PROTOCOL=1 requires NUM_VIDEOS=300 and RFID_MAX_VIDEOS=50" >&2
   exit 2
 fi
 
@@ -50,6 +74,8 @@ echo "Retrieved memories: 8"
 echo "Sampling steps: 20"
 echo "Dataset/global seed: $DATASET_SEED/$GLOBAL_SEED"
 echo "Videos: $NUM_VIDEOS"
+echo "Paper protocol: $PAPER_PROTOCOL"
+echo "rFID cohort: $RFID_MAX_VIDEOS videos / $((RFID_MAX_VIDEOS * 100)) frames"
 echo "GPU: $GPU"
 echo "Unbounded run: $UNBOUNDED_RUN"
 echo "KEEPSAKE run: $KEEPSAKE_RUN (slam_covisibility, B=$KEEPSAKE_BUDGET)"
@@ -145,5 +171,5 @@ python "$REPO_ROOT/utils/summarize_worldmem_native_eval.py" \
   --runs "$UNBOUNDED_RUN,$KEEPSAKE_RUN" \
   --labels "WorldMem,WorldMem + KEEPSAKE" \
   --limit "$NUM_VIDEOS" \
+  --rfid-videos "$RFID_MAX_VIDEOS" \
   --output-dir "$METRICS_DIR"
-

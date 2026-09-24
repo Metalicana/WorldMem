@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--runs", required=True)
     parser.add_argument("--labels", required=True)
     parser.add_argument("--limit", type=int, required=True)
+    parser.add_argument("--rfid-videos", type=int)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
 
@@ -74,6 +75,8 @@ def main():
         raise ValueError("--runs and --labels must contain the same number of entries")
     if args.limit < 1:
         raise ValueError("--limit must be positive")
+    if args.rfid_videos is not None and not 1 <= args.rfid_videos <= args.limit:
+        raise ValueError("--rfid-videos must be between 1 and --limit")
 
     rows = []
     for run_name, label in zip(runs, labels):
@@ -98,6 +101,12 @@ def main():
                 "method": label,
                 "videos": args.limit,
                 "generated_frames_per_video": 100,
+                "rfid_videos": args.rfid_videos,
+                "rfid_frames": (
+                    args.rfid_videos * 100
+                    if args.rfid_videos is not None
+                    else None
+                ),
                 "psnr": mean(records, "psnr"),
                 "lpips": mean(records, "lpips"),
                 "mse": mean(records, "mse"),
@@ -120,6 +129,13 @@ def main():
                     "retrieved_memory_frames": 8,
                     "sampling_timesteps": 20,
                     "gt_target": "VAE-reconstructed exact-index GT",
+                    "metric_videos": args.limit,
+                    "rfid_videos": args.rfid_videos,
+                    "rfid_frames": (
+                        args.rfid_videos * 100
+                        if args.rfid_videos is not None
+                        else None
+                    ),
                 },
                 "results": rows,
             },
@@ -143,4 +159,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

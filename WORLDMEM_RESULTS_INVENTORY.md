@@ -1,6 +1,6 @@
 # WorldMem Results Inventory
 
-Updated: 2026-09-15
+Updated: 2026-09-23
 
 Paper: **KEEPSAKE: Selective Spatial Memory for Long-Horizon Video Generation**.
 The final KEEPSAKE method is the SLAM-style Geometric Coverage policy; its
@@ -30,8 +30,9 @@ request; its historical setup instructions below are not a pending requirement.
   IDs 0 through 14 for every cell.
 - Lower LPIPS and FVD are better. Higher VBench scores are better.
 
-The post-hoc 60-second LPIPS/FVD values are comparable across these WorldMem
-runs, but not directly to MemCam or the original short-horizon WorldMem paper.
+The post-hoc 60-second LPIPS/FVD/reconstruction-FID values are comparable across
+these WorldMem runs, but not directly to MemCam or the original short-horizon
+WorldMem paper.
 
 ## Complete 60-Second Budget Sweep
 
@@ -194,6 +195,43 @@ This table is the locked cross-system comparison. The full budget sweep is a
 separate sensitivity result; do not substitute each policy's test-optimal
 budget into the fixed-B32 table.
 
+## Fixed-B32 Reconstruction FID
+
+One shared deterministic set of 5,000 frames was sampled across the same first
+15 trajectories for all six methods. Generated MP4 frames are compared against
+their exact-index raw dataset GT frames. Lower is better.
+
+| Policy | Budget | Reconstruction FID |
+| --- | ---: | ---: |
+| Unbounded | - | 165.567093 |
+| FIFO | 32 | 180.698090 |
+| MCE | 32 | 117.533195 |
+| K-center | 32 | 98.036743 |
+| Latent-RI | 32 | 88.024307 |
+| **KEEPSAKE** | **32** | **81.851135** |
+
+KEEPSAKE is best and is 50.6% lower than Unbounded. This long-horizon metric
+uses raw exact-index GT and must not be numerically compared with the original
+WorldMem paper's native rFID, whose released path uses VAE-reconstructed GT.
+Source: `/data/ab575577/worldmem/outputs/memory_policy/metrics/rfid_60s_n15/summary.csv`.
+
+## Native Beyond-Context Pilot
+
+The released 100-frame evaluation protocol was run on 10 matched test videos
+with dataset and generation seed 42. Both methods start from the same 600-frame
+history and retrieve 8 memories per query; KEEPSAKE limits the persistent bank
+to 32 frames. PSNR, LPIPS, and rFID use VAE-reconstructed exact-index GT.
+
+| Policy | Budget | Videos | Frames | PSNR | LPIPS | rFID |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Unbounded | - | 10 | 1,000 | 29.2699 | 0.173243 | 45.2483 |
+| **KEEPSAKE** | **32** | **10** | **1,000** | **29.4097** | **0.150024** | **34.1663** |
+
+KEEPSAKE gains 0.1398 dB PSNR, lowers LPIPS by 13.4%, and lowers rFID by
+24.5%. Treat this as an N=10 matched pilot. Its 1,000-frame absolute rFID is not
+directly comparable to the released 5,000-frame value. Source:
+`/data/ab575577/worldmem/outputs/memory_policy/metrics/native_worldmem_10s_n10/summary.csv`.
+
 ## Systems Profile
 
 Measured on one 60-second video. Device peak is total `nvidia-smi` usage.
@@ -287,6 +325,8 @@ on the broader metric suite.
 | --- | --- |
 | Complete LPIPS budget sweep | Valid, 21 cells, 15 matched videos |
 | Complete FVD budget sweep | Valid, 21 cells, 15 matched videos |
+| Fixed-B32 reconstruction FID | Valid, 6 methods, 15 matched videos, 5,000 shared frames |
+| Native beyond-context comparison | Valid matched pilot, 2 methods, 10 videos, 1,000 frames |
 | Standard VBench | Valid, 21 cells, 15 matched videos |
 | VBench-Long | Corrected original-video grouping and full 21-cell evaluator ready; results pending |
 | CUT3R generated-video metrics | Invalid: GT Minecraft sanity failed |

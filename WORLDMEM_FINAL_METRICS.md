@@ -1,6 +1,6 @@
 # WorldMem Final Metrics
 
-Updated: 2026-09-18.
+Updated: 2026-09-23.
 
 Paper: **KEEPSAKE: Selective Spatial Memory for Long-Horizon Video Generation**.
 KEEPSAKE is `slam_covisibility`, labeled Geometric Coverage in the source CSV.
@@ -10,7 +10,8 @@ KEEPSAKE is `slam_covisibility`, labeled Geometric Coverage in the source CSV.
 - 60-second generation, 600 generated frames at 10 FPS, 600 initial context frames.
 - 15 videos per configuration, generated batch IDs 0 through 14.
 - Unbounded plus five bounded policies at budgets 16, 32, 64, and 128: 21 configurations.
-- Final quality metrics: LPIPS, FVD, and six standard VBench dimensions.
+- Final quality metrics: LPIPS, FVD, matched 5,000-frame reconstruction FID,
+  and six standard VBench dimensions.
 - VBench-Long is excluded by request. CUT3R is excluded because the GT sanity test failed.
 
 Source: [saved metric CSV](assets/results/worldmem_budget_sweep_60s_n15.csv).
@@ -93,6 +94,64 @@ not significance tests, and dynamic degree does not by itself establish fidelity
 
 Use B32 for the locked cross-system comparison. Keep the complete sweep separate
 from that fixed-budget table rather than choosing every policy's best test budget.
+
+## Matched 5,000-Frame Reconstruction FID
+
+This post-hoc 60-second comparison uses one shared deterministic set of 5,000
+generated-frame indices from the same 15 trajectories for every B32 method.
+Generated frames are compared with exact-index raw Minecraft dataset frames.
+Lower is better.
+
+| Model | Budget | Videos | Frames | Reconstruction FID |
+| --- | ---: | ---: | ---: | ---: |
+| WorldMem | - | 15 | 5,000 | 165.567093 |
+| WorldMem + FIFO | 32 | 15 | 5,000 | 180.698090 |
+| WorldMem + MCE | 32 | 15 | 5,000 | 117.533195 |
+| WorldMem + K-center | 32 | 15 | 5,000 | 98.036743 |
+| WorldMem + RI | 32 | 15 | 5,000 | 88.024307 |
+| **WorldMem + KEEPSAKE** | **32** | **15** | **5,000** | **81.851135** |
+
+KEEPSAKE reduces reconstruction FID by `83.715958`, or `50.6%`, relative to
+unbounded WorldMem. FIFO is 9.1% worse than unbounded, while all selective
+retention methods improve it. The source summary is:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/rfid_60s_n15/summary.csv
+```
+
+These values are directly comparable across the six listed 60-second policy
+runs, but not numerically comparable to WorldMem's native short-horizon paper
+rFID. The released native evaluation uses VAE-reconstructed GT, whereas this
+long-horizon extension uses exact-index raw dataset GT. Machine-readable values
+are recorded in `assets/results/worldmem_rfid_60s_n15.csv`.
+
+## Native Beyond-Context Pilot
+
+This matched pilot follows WorldMem's released beyond-context protocol: a
+600-frame initial memory bank, an 8-frame generator context, 8 retrieved memory
+frames, 20 diffusion sampling steps, and 100 generated future frames. Both
+methods use dataset and generation seed 42. Metrics compare against exact-index
+GT passed through WorldMem's VAE reconstruction path. KEEPSAKE retains 32
+persistent memories while preserving the native retrieval interface.
+
+| Model | Budget | Videos | Generated frames | PSNR | LPIPS | rFID |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| WorldMem | - | 10 | 1,000 | 29.2699 | 0.173243 | 45.2483 |
+| **WorldMem + KEEPSAKE** | **32** | **10** | **1,000** | **29.4097** | **0.150024** | **34.1663** |
+
+At this matched N=10 operating point, KEEPSAKE improves PSNR by `0.1398` dB,
+reduces LPIPS by `0.023219` (`13.4%`), and reduces rFID by `11.0820` (`24.5%`).
+This establishes a favorable native-protocol pilot, not a full reproduction of
+the paper-scale result. The absolute rFID uses only 1,000 generated frames and
+must not be compared directly with the released README's 5,000-frame FID or the
+paper's separately specified evaluation cohort. Machine-readable values are in
+`assets/results/worldmem_native_10s_n10.csv`.
+
+Source summary:
+
+```text
+/data/ab575577/worldmem/outputs/memory_policy/metrics/native_worldmem_10s_n10/summary.csv
+```
 
 ## Five Figure Variations
 

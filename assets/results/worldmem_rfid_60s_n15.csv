@@ -1,0 +1,7 @@
+run_name,policy,budget,videos,frames,gt_reference,rfid
+worldmem_unbounded_60s_n30,Unbounded,,15,5000,exact-index raw dataset GT,165.567093
+worldmem_fifo_b32_60s_n30,FIFO,32,15,5000,exact-index raw dataset GT,180.698090
+worldmem_mce_b32_60s_n15,MCE,32,15,5000,exact-index raw dataset GT,117.533195
+worldmem_kcenter_coreset_b32_60s_n15,K-center,32,15,5000,exact-index raw dataset GT,98.036743
+worldmem_rarity_irreplaceability_b32_60s_n30,Latent-RI,32,15,5000,exact-index raw dataset GT,88.024307
+worldmem_slam_covisibility_b32_60s_n30,KEEPSAKE,32,15,5000,exact-index raw dataset GT,81.851135

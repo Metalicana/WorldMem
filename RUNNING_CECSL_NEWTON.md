@@ -2894,3 +2894,45 @@ WORLDMEM_REPO_ROOT=$HOME/WorldMem \
 WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
 bash scripts/run_worldmem_native_eval_pair.sh
 ```
+
+## CPU-Only Revisit Candidates for the Qualitative Figure
+
+This audit uses the requested Minecraft camera trajectory only. It does not
+generate videos and does not compute aggregate quality metrics. Candidate
+indices are zero-based indices into each 600-frame prediction MP4. The rollout
+clock is 10 fps (60 seconds); the files are encoded at 15 fps and therefore
+play for 40 seconds. Output frame `j` maps to history/clip index `600+j` and raw
+dataset frame `700+j` because the dataset skips its first 100 frames.
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+REVISIT_OUTPUT_DIR=/data/ab575577/worldmem/outputs/memory_policy/metrics/revisit_qualitative_60s_n15 \
+bash scripts/export_worldmem_revisit_candidates.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/revisit_qualitative_60s_n15_$(date +%F_%H%M).log
+```
+
+The default endpoint thresholds are 0.75 Minecraft block-coordinate units and
+15 degrees of full SO(3) rotation. A valid return must be at least 5 seconds
+later and contain a contiguous one-second departure of at least two blocks or
+45 degrees. The middle frame is the strongest measured departure inside that
+away interval, not the temporal midpoint. Contiguous endpoint matches are one
+return episode; its closest-pose frame is exported, so a post-return pause is
+not counted as many revisits. The output folder contains:
+
+```text
+revisit_candidates.csv
+provenance.json
+trajectory_mapping.csv
+preview_manifest.csv
+previews/trajectory_XXXXX/candidate_YY/{unbounded,fifo_b32,keepsake_b32,ground_truth}/
+```
+
+GT previews are exported when available but `gt_checked` remains false until a
+human visually checks them. Historical runs do not record the final source
+path after a dataset read retry, so provenance verifies the common requested
+trajectory under dataset seed 42 and records that legacy limitation explicitly.

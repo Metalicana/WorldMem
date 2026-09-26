@@ -31,6 +31,8 @@ select_coverage_hysteresis_admissions = (
 estimate_cluster_threshold = POLICIES.estimate_cluster_threshold
 connected_components_from_threshold = POLICIES.connected_components_from_threshold
 cosine_distances = POLICIES.cosine_distances
+pose_distances = POLICIES.pose_distances
+rotation_distance = POLICIES.rotation_distance
 
 
 def make_line_c2ws(positions):
@@ -73,6 +75,124 @@ class FrameMemoryBufferTest(unittest.TestCase):
             buffer.update(range(30))
             retained.append(buffer.candidates())
         self.assertNotEqual(retained[0], retained[1])
+
+    def test_evict_to_budget_can_stop_after_one_eviction(self):
+        buffer = FrameMemoryBuffer(policy="slam_covisibility", budget=2)
+        for frame_idx in range(4):
+            buffer.add(frame_idx, evict=False)
+        buffer.set_scores({0: 0.0, 1: 1.0, 2: 2.0, 3: 3.0})
+
+        first = buffer.evict_to_budget(max_evictions=1)
+
+        self.assertEqual(first, [0])
+        self.assertEqual(len(buffer), 3)
+        self.assertEqual(buffer.evict_to_budget(), [1])
+        self.assertEqual(buffer.candidates(), [2, 3])
+
+
+class SlamCovisibilityAblationTest(unittest.TestCase):
+    def setUp(self):
+        self.frames = [0, 1, 2, 3]
+        self.c2ws = make_line_c2ws([0.0, 0.1, 8.0, 20.0])
+        self.features = {
+            0: np.asarray([1.0, 0.0]),
+            1: np.asarray([0.99, 0.01]),
+            2: np.asarray([0.0, 1.0]),
+            3: np.asarray([-1.0, 0.0]),
+        }
+
+    def test_pose_only_ignores_appearance_features(self):
+        left = compute_slam_covisibility_scores(
+            self.frames,
+            self.c2ws,
+            latent_features=self.features,
+            geometry_weight=1.0,
+            visual_weight=0.0,
+        )
+        changed_features = {
+            frame_idx: np.asarray([float(frame_idx + 1), 1.0])
+            for frame_idx in self.frames
+        }
+        right = compute_slam_covisibility_scores(
+            self.frames,
+            self.c2ws,
+            latent_features=changed_features,
+            geometry_weight=1.0,
+            visual_weight=0.0,
+        )
+        self.assertEqual(left, right)
+
+    def test_explicit_full_weights_match_legacy_defaults(self):
+        default = compute_slam_covisibility_scores(
+            self.frames,
+            self.c2ws,
+            latent_features=self.features,
+        )
+        explicit = compute_slam_covisibility_scores(
+            self.frames,
+            self.c2ws,
+            latent_features=self.features,
+            geometry_weight=0.65,
+            visual_weight=0.35,
+        )
+        self.assertEqual(default, explicit)
+
+    def test_appearance_only_ignores_camera_geometry(self):
+        left, details = compute_slam_covisibility_scores(
+            self.frames,
+            self.c2ws,
+            latent_features=self.features,
+            geometry_weight=0.0,
+            visual_weight=1.0,
+            return_details=True,
+        )
+        right = compute_slam_covisibility_scores(
+            self.frames,
+            make_line_c2ws([0.0, 100.0, 200.0, 300.0]),
+            latent_features=self.features,
+            geometry_weight=0.0,
+            visual_weight=1.0,
+        )
+        self.assertEqual(left, right)
+        self.assertEqual(
+            {
+                (row["slam_geometry_weight"], row["slam_visual_weight"])
+                for row in details.values()
+            },
+            {(0.0, 1.0)},
+        )
+
+    def test_zero_signal_weights_are_rejected(self):
+        with self.assertRaises(ValueError):
+            compute_slam_covisibility_scores(
+                self.frames,
+                self.c2ws,
+                latent_features=self.features,
+                geometry_weight=0.0,
+                visual_weight=0.0,
+            )
+
+    def test_vectorized_pose_distance_matches_scalar_definition(self):
+        angles = np.deg2rad([0.0, 15.0, 90.0, 179.0])
+        c2ws = make_line_c2ws([0.0, 1.0, 3.0, 10.0])
+        for index, angle in enumerate(angles):
+            cosine, sine = np.cos(angle), np.sin(angle)
+            c2ws[index, :3, :3] = np.asarray(
+                [[cosine, 0.0, sine], [0.0, 1.0, 0.0], [-sine, 0.0, cosine]]
+            )
+        actual = pose_distances(c2ws, self.frames, self.frames)
+
+        positions = c2ws[:, :3, 3]
+        position = np.linalg.norm(positions[:, None] - positions[None, :], axis=-1)
+        nonzero = position[position > 1e-8]
+        position /= max(float(np.median(nonzero)), 1e-6)
+        expected_rotation = np.zeros_like(position)
+        for row in self.frames:
+            for col in self.frames:
+                expected_rotation[row, col] = rotation_distance(
+                    c2ws[row, :3, :3], c2ws[col, :3, :3]
+                )
+        np.testing.assert_allclose(actual, position + 2.0 * expected_rotation)
 
 
 class CoverageHysteresisTest(unittest.TestCase):

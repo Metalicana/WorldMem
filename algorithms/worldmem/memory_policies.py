@@ -100,13 +100,17 @@ class FrameMemoryBuffer:
         stats["selection_overlap_sum"] += overlap
         stats["best_selection_overlap"] = max(stats["best_selection_overlap"], overlap)
 
-    def evict_to_budget(self, protected_frames=None):
+    def evict_to_budget(self, protected_frames=None, max_evictions=None):
         if self.budget is None or self.policy == "unbounded":
             return []
+        if max_evictions is not None and int(max_evictions) < 0:
+            raise ValueError("max_evictions must be non-negative when provided")
 
         protected_frames = set(protected_frames or []) | self._pinned_frames
         evicted = []
         while len(self._frames) > self.budget:
+            if max_evictions is not None and len(evicted) >= int(max_evictions):
+                break
             evictable = [
                 frame_idx
                 for frame_idx in self._frames.keys()
@@ -175,12 +179,20 @@ def pose_distances(c2ws, frame_indices, target_indices, rotation_weight=2.0):
     position_scale = max(position_scale, 1e-6)
     position_dists = position_dists / position_scale
 
-    rotation_dists = np.zeros_like(position_dists)
-    for row, frame_idx in enumerate(frame_indices):
-        rotation_a = c2ws[frame_idx, :3, :3]
-        for col, target_idx in enumerate(target_indices):
-            rotation_b = c2ws[target_idx, :3, :3]
-            rotation_dists[row, col] = rotation_distance(rotation_a, rotation_b)
+    # trace(R_a.T @ R_b) is the Frobenius inner product of the rotations.
+    # Vectorizing this exact calculation keeps iterative-priority ablations
+    # practical when the initial 600-frame bank is reduced one eviction at a
+    # time.
+    frame_rotations = c2ws[frame_indices, :3, :3]
+    target_rotations = c2ws[target_indices, :3, :3]
+    relative_traces = np.einsum(
+        "aij,bij->ab",
+        frame_rotations,
+        target_rotations,
+    )
+    rotation_cosines = np.clip((relative_traces - 1.0) / 2.0, -1.0, 1.0)
+    rotation_cosines[np.equal.outer(frame_indices, target_indices)] = 1.0
+    rotation_dists = np.arccos(rotation_cosines) / np.pi
 
     return position_dists + rotation_weight * rotation_dists
 
@@ -592,6 +604,12 @@ def compute_slam_covisibility_scores(
 ):
     memory_frame_indices = list(memory_frame_indices)
     pinned_frames = set(pinned_frames or [])
+    visual_weight = float(visual_weight)
+    geometry_weight = float(geometry_weight)
+    if visual_weight < 0.0 or geometry_weight < 0.0:
+        raise ValueError("SLAM covisibility weights must be non-negative")
+    if visual_weight + geometry_weight <= 0.0:
+        raise ValueError("At least one SLAM covisibility weight must be positive")
     if not memory_frame_indices:
         return ({}, {}) if return_details else {}
 
@@ -643,6 +661,8 @@ def compute_slam_covisibility_scores(
             "unique_bonus": float(unique_bonus),
             "covisibility_threshold": float(covisibility_threshold),
             "n_other_observers": int(n_other_observers),
+            "slam_geometry_weight": geometry_weight,
+            "slam_visual_weight": visual_weight,
         }
 
     return (scores, details) if return_details else scores

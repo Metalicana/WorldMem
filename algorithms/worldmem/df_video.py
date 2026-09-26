@@ -517,6 +517,32 @@ class WorldMemMinecraft(DiffusionForcingBase):
         self.kcenter_visual_weight = float(getattr(cfg, "kcenter_visual_weight", 0.5))
         self.kcenter_pose_weight = float(getattr(cfg, "kcenter_pose_weight", 0.5))
         self.kcenter_time_weight = float(getattr(cfg, "kcenter_time_weight", 0.0))
+        self.slam_geometry_weight = float(
+            getattr(cfg, "slam_geometry_weight", 0.65)
+        )
+        self.slam_visual_weight = float(getattr(cfg, "slam_visual_weight", 0.35))
+        if self.slam_geometry_weight < 0.0 or self.slam_visual_weight < 0.0:
+            raise ValueError("SLAM covisibility weights must be non-negative")
+        if self.slam_geometry_weight + self.slam_visual_weight <= 0.0:
+            raise ValueError(
+                "At least one of slam_geometry_weight and slam_visual_weight "
+                "must be positive"
+            )
+        self.memory_priority_update = str(
+            getattr(cfg, "memory_priority_update", "frozen")
+        )
+        if self.memory_priority_update not in {"frozen", "recompute"}:
+            raise ValueError(
+                "memory_priority_update must be either 'frozen' or 'recompute'"
+            )
+        if (
+            self.memory_priority_update == "recompute"
+            and self.memory_policy != "slam_covisibility"
+        ):
+            raise ValueError(
+                "memory_priority_update='recompute' is currently defined only "
+                "for memory_policy='slam_covisibility'"
+            )
         self.mce_alpha = float(getattr(cfg, "mce_alpha", 0.65))
         if not 0.0 <= self.mce_alpha <= 1.0:
             raise ValueError("mce_alpha must be in [0, 1]")
@@ -1354,17 +1380,41 @@ class WorldMemMinecraft(DiffusionForcingBase):
         return dino_features, rgb_features
 
     def _memory_feature_dicts(self, xs_pred, frame_indices, batch_index):
-        if self.memory_feature_backend == "latent":
-            latent = self._latent_feature_dict(xs_pred, frame_indices, batch_index)
-            return latent, None, "cosine"
-        dino, rgb = self._dino_rgb_feature_dict(
-            xs_pred,
-            frame_indices,
-            batch_index,
-        )
-        if self.memory_feature_backend == "dino_rgb":
-            return dino, rgb, "mean_abs"
-        return dino, None, "cosine"
+        profile_features = bool(getattr(self, "profile_timing", False))
+        if profile_features:
+            self._sync_cuda_if_needed()
+            feature_start = time.perf_counter()
+        try:
+            if self.memory_feature_backend == "latent":
+                latent = self._latent_feature_dict(
+                    xs_pred,
+                    frame_indices,
+                    batch_index,
+                )
+                return latent, None, "cosine"
+            dino, rgb = self._dino_rgb_feature_dict(
+                xs_pred,
+                frame_indices,
+                batch_index,
+            )
+            if self.memory_feature_backend == "dino_rgb":
+                return dino, rgb, "mean_abs"
+            return dino, None, "cosine"
+        finally:
+            if profile_features:
+                self._sync_cuda_if_needed()
+                self._profile_descriptor_seconds = float(
+                    getattr(self, "_profile_descriptor_seconds", 0.0)
+                    + time.perf_counter()
+                    - feature_start
+                )
+                self._profile_descriptor_calls = int(
+                    getattr(self, "_profile_descriptor_calls", 0) + 1
+                )
+                self._profile_descriptor_frames_requested = int(
+                    getattr(self, "_profile_descriptor_frames_requested", 0)
+                    + len({int(frame_idx) for frame_idx in frame_indices})
+                )
 
     def _prune_memory_feature_caches(self, memory_buffers):
         if self.memory_feature_backend == "latent" or memory_buffers is None:
@@ -1541,6 +1591,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "eviction_nearest_covisible_frame": detail.get("nearest_covisible_frame"),
             "eviction_marginal_contribution": detail.get("marginal_contribution"),
             "eviction_unique_bonus": detail.get("unique_bonus"),
+            "eviction_slam_geometry_weight": detail.get("slam_geometry_weight"),
+            "eviction_slam_visual_weight": detail.get("slam_visual_weight"),
+            "eviction_priority_update": detail.get("memory_priority_update"),
+            "eviction_priority_iteration": detail.get("priority_iteration"),
+            "eviction_candidates_before": detail.get("candidates_before"),
             "eviction_kcenter_selected": detail.get("kcenter_selected"),
             "eviction_kcenter_forced_keep": detail.get("kcenter_forced_keep"),
             "eviction_kcenter_rank": detail.get("kcenter_rank"),
@@ -1645,6 +1700,8 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 c2ws=c2ws,
                 pinned_frames=pinned_frames,
                 latent_features=primary_features,
+                geometry_weight=self.slam_geometry_weight,
+                visual_weight=self.slam_visual_weight,
                 return_details=True,
             )
 
@@ -1714,6 +1771,78 @@ class WorldMemMinecraft(DiffusionForcingBase):
 
         return None, {}
 
+    def _update_memory_buffer_with_priorities(
+        self,
+        buffer,
+        frame_indices,
+        c2w_mat,
+        xs_pred,
+        batch_index,
+        protected_frames,
+        archive_frame_indices=None,
+    ):
+        """Update one bank and retain the score snapshot used for each eviction."""
+        frame_indices = [int(frame_idx) for frame_idx in frame_indices]
+        current_memory = buffer.candidates()
+        prospective_memory = current_memory + [
+            frame_idx for frame_idx in frame_indices if frame_idx not in current_memory
+        ]
+
+        if self.memory_priority_update == "frozen":
+            scores, score_details = self._compute_memory_scores(
+                prospective_memory,
+                c2w_mat,
+                xs_pred,
+                batch_index,
+                archive_frame_indices=archive_frame_indices,
+            )
+            evicted = buffer.update(
+                frame_indices,
+                eviction_scores=scores,
+                protected_frames=protected_frames,
+            )
+            records = []
+            for iteration, evicted_frame in enumerate(evicted):
+                detail = dict(score_details.get(evicted_frame, {}))
+                detail["memory_priority_update"] = "frozen"
+                detail["priority_iteration"] = int(iteration)
+                detail["candidates_before"] = int(
+                    len(prospective_memory) - iteration
+                )
+                records.append((int(evicted_frame), detail))
+            return records
+
+        for frame_idx in frame_indices:
+            buffer.add(frame_idx, evict=False)
+
+        records = []
+        iteration = 0
+        while buffer.budget is not None and len(buffer) > buffer.budget:
+            candidates = buffer.candidates()
+            scores, score_details = self._compute_memory_scores(
+                candidates,
+                c2w_mat,
+                xs_pred,
+                batch_index,
+                archive_frame_indices=archive_frame_indices,
+            )
+            if scores:
+                buffer.set_scores(scores)
+            evicted = buffer.evict_to_budget(
+                protected_frames=protected_frames,
+                max_evictions=1,
+            )
+            if not evicted:
+                break
+            evicted_frame = int(evicted[0])
+            detail = dict(score_details.get(evicted_frame, {}))
+            detail["memory_priority_update"] = "recompute"
+            detail["priority_iteration"] = int(iteration)
+            detail["candidates_before"] = int(len(candidates))
+            records.append((evicted_frame, detail))
+            iteration += 1
+        return records
+
     def _build_memory_buffers(self, n_context_frames, batch_size, c2w_mat, xs_pred):
         if self.memory_policy == "unbounded":
             return None
@@ -1739,20 +1868,16 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     + batch_index
                 ),
             )
-            scores, score_details = self._compute_memory_scores(
+            eviction_records = self._update_memory_buffer_with_priorities(
+                buffer,
                 initial_frames,
                 c2w_mat,
                 xs_pred,
                 batch_index,
+                protected_frames=protected_frames,
                 archive_frame_indices=self._kcenter_archive_indices(n_context_frames),
             )
-            evicted = buffer.update(
-                initial_frames,
-                eviction_scores=scores,
-                protected_frames=protected_frames,
-            )
-            for evicted_frame in evicted:
-                detail = score_details.get(evicted_frame, {})
+            for evicted_frame, detail in eviction_records:
                 self._write_access_trace(
                     {
                         "event": "memory_eviction",
@@ -1808,6 +1933,81 @@ class WorldMemMinecraft(DiffusionForcingBase):
         total_bytes = sum(tensor.numel() * tensor.element_size() for tensor in gpu_memory_bank.values())
         return float(total_bytes / (1024**2))
 
+    def _latent_payload_bytes(self, latents, frame_indices):
+        if latents is None or int(latents.shape[0]) == 0:
+            return 0
+        valid_count = len({
+            int(frame_idx)
+            for frame_idx in frame_indices
+            if 0 <= int(frame_idx) < int(latents.shape[0])
+        })
+        bytes_per_frame = latents[0].numel() * latents.element_size()
+        return int(valid_count * bytes_per_frame)
+
+    def _record_memory_archive_state(
+        self,
+        memory_buffers,
+        memory_source_latents,
+        end_frame,
+        phase,
+        gpu_memory_bank=None,
+    ):
+        if not self.profile_timing:
+            return
+        archive_frames = self._gpu_memory_bank_target_frames(
+            memory_buffers,
+            end_frame,
+        )
+        archive_bytes = self._latent_payload_bytes(
+            memory_source_latents,
+            archive_frames,
+        )
+        history_bytes = self._latent_payload_bytes(
+            memory_source_latents,
+            range(int(end_frame)),
+        )
+        gpu_bank_bytes = 0
+        if gpu_memory_bank:
+            gpu_bank_bytes = int(
+                sum(
+                    tensor.numel() * tensor.element_size()
+                    for tensor in gpu_memory_bank.values()
+                )
+            )
+
+        descriptor_cache_bytes = 0
+        for cache_group in (self._memory_dino_features, self._memory_rgb_features):
+            descriptor_cache_bytes += sum(
+                value.nbytes
+                for batch_cache in cache_group
+                for value in batch_cache.values()
+            )
+
+        context_frames = int(self._current_context_frames or 0)
+        self._write_access_trace(
+            {
+                "event": "memory_archive_state",
+                "phase": phase,
+                "memory_bank_device": self.memory_bank_device,
+                "memory_end_frame": int(end_frame),
+                "context_frames": context_frames,
+                "generated_frames": max(int(end_frame) - context_frames, 0),
+                "archive_frames": int(len(archive_frames)),
+                "archive_latent_payload_bytes": archive_bytes,
+                "archive_latent_payload_mib": float(archive_bytes / (1024**2)),
+                "history_frames": int(end_frame),
+                "history_latent_payload_bytes": history_bytes,
+                "history_latent_payload_mib": float(history_bytes / (1024**2)),
+                "gpu_bank_payload_bytes": gpu_bank_bytes,
+                "gpu_bank_payload_mib": float(gpu_bank_bytes / (1024**2)),
+                "descriptor_cache_bytes": int(descriptor_cache_bytes),
+                "descriptor_cache_mib": float(
+                    descriptor_cache_bytes / (1024**2)
+                ),
+                "payload_scope": "latent_tensor_data_only",
+            }
+        )
+
     def _sync_gpu_memory_bank(self, gpu_memory_bank, xs_pred, memory_buffers, end_frame, phase):
         if self.memory_bank_device != "gpu":
             return None
@@ -1834,6 +2034,12 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "event": "gpu_memory_bank_sync",
                 "phase": phase,
                 "memory_bank_device": self.memory_bank_device,
+                "memory_end_frame": int(end_frame),
+                "context_frames": int(self._current_context_frames or 0),
+                "generated_frames": max(
+                    int(end_frame) - int(self._current_context_frames or 0),
+                    0,
+                ),
                 "stored_memory_size": int(len(gpu_memory_bank)),
                 "target_memory_size": int(len(target_frames)),
                 "estimated_bank_mib": self._gpu_memory_bank_mib(gpu_memory_bank),
@@ -2100,25 +2306,16 @@ class WorldMemMinecraft(DiffusionForcingBase):
                         "causal_gate_admitted", True
                     )
                 ]
-            prospective_memory = current_memory + [
-                frame_idx
-                for frame_idx in admitted_frames
-                if frame_idx not in current_memory
-            ]
-            scores, score_details = self._compute_memory_scores(
-                prospective_memory,
+            eviction_records = self._update_memory_buffer_with_priorities(
+                buffer,
+                admitted_frames,
                 c2w_mat,
                 memory_source_latents,
                 batch_index,
+                protected_frames=protected_frames,
                 archive_frame_indices=self._kcenter_archive_indices(curr_frame + horizon),
             )
-            evicted = buffer.update(
-                admitted_frames,
-                eviction_scores=scores,
-                protected_frames=protected_frames,
-            )
-            for evicted_frame in evicted:
-                detail = score_details.get(evicted_frame, {})
+            for evicted_frame, detail in eviction_records:
                 self._write_access_trace(
                     {
                         "event": "memory_eviction",
@@ -2740,9 +2937,14 @@ class WorldMemMinecraft(DiffusionForcingBase):
             "retrieval_seconds": 0.0,
             "sampling_seconds": 0.0,
             "memory_update_seconds": 0.0,
+            "initial_memory_update_seconds": 0.0,
+            "generation_memory_update_seconds": 0.0,
             "decode_seconds": 0.0,
             "chunks": 0,
         }
+        self._profile_descriptor_seconds = 0.0
+        self._profile_descriptor_calls = 0
+        self._profile_descriptor_frames_requested = 0
         self._open_access_trace()
         self._reset_cuda_memory_peak()
         self._write_cuda_memory_trace(
@@ -2778,6 +2980,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
         memory_source_latents = (
             xs if self.memory_reference_source == "ground_truth" else xs_pred
         )
+        if self.profile_timing:
+            self._sync_cuda_if_needed()
+            initial_memory_start = time.perf_counter()
         memory_buffers = self._build_memory_buffers(
             n_context_frames,
             batch_size,
@@ -2791,6 +2996,11 @@ class WorldMemMinecraft(DiffusionForcingBase):
             curr_frame,
             phase="initial_context",
         )
+        if self.profile_timing:
+            self._sync_cuda_if_needed()
+            initial_memory_seconds = time.perf_counter() - initial_memory_start
+            timing["initial_memory_update_seconds"] += initial_memory_seconds
+            timing["memory_update_seconds"] += initial_memory_seconds
         self._write_access_trace(
             {
                 "event": "memory_run_start",
@@ -2805,6 +3015,9 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "dataset_batch_idx": int(global_batch_idx),
                 "generation_seed": self._current_generation_seed,
                 "memory_policy_seed": int(self.memory_policy_seed),
+                "slam_geometry_weight": self.slam_geometry_weight,
+                "slam_visual_weight": self.slam_visual_weight,
+                "memory_priority_update": self.memory_priority_update,
                 "trace_retrieved_memory_quality": self.trace_retrieved_memory_quality,
                 "gt_memory_replay_target_frame": self.gt_memory_replay_target_frame,
                 "gt_memory_replay_expected_indices": self.gt_memory_replay_expected_indices,
@@ -2818,6 +3031,13 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 "causal_gate_calibration_path": self.causal_gate_calibration_path,
                 "causal_gate_require_approved": self.causal_gate_require_approved,
             }
+        )
+        self._record_memory_archive_state(
+            memory_buffers,
+            memory_source_latents,
+            curr_frame,
+            phase="initial_context",
+            gpu_memory_bank=gpu_memory_bank,
         )
         self._record_memory_bank_diagnostics(
             memory_buffers,
@@ -3159,16 +3379,27 @@ class WorldMemMinecraft(DiffusionForcingBase):
                 curr_frame + horizon,
                 phase="generation",
             )
+            if self.profile_timing:
+                self._sync_cuda_if_needed()
+                generation_update_seconds = time.perf_counter() - section_start
+                timing["generation_memory_update_seconds"] += (
+                    generation_update_seconds
+                )
+                timing["memory_update_seconds"] += generation_update_seconds
+                timing["chunks"] += 1
+            self._record_memory_archive_state(
+                memory_buffers,
+                memory_source_latents,
+                curr_frame + horizon,
+                phase="generation",
+                gpu_memory_bank=gpu_memory_bank,
+            )
             self._record_memory_bank_diagnostics(
                 memory_buffers,
                 curr_frame + horizon,
                 memory_source_latents,
                 phase="generation",
             )
-            if self.profile_timing:
-                self._sync_cuda_if_needed()
-                timing["memory_update_seconds"] += time.perf_counter() - section_start
-                timing["chunks"] += 1
             curr_frame += horizon
             pbar.update(horizon)
 
@@ -3253,6 +3484,26 @@ class WorldMemMinecraft(DiffusionForcingBase):
                     "retrieval_seconds": float(timing["retrieval_seconds"]),
                     "sampling_seconds": float(timing["sampling_seconds"]),
                     "memory_update_seconds": float(timing["memory_update_seconds"]),
+                    "initial_memory_update_seconds": float(
+                        timing["initial_memory_update_seconds"]
+                    ),
+                    "generation_memory_update_seconds": float(
+                        timing["generation_memory_update_seconds"]
+                    ),
+                    "descriptor_extraction_seconds": float(
+                        self._profile_descriptor_seconds
+                    ),
+                    "descriptor_calls": int(self._profile_descriptor_calls),
+                    "descriptor_frames_requested": int(
+                        self._profile_descriptor_frames_requested
+                    ),
+                    "memory_update_excluding_descriptor_seconds": float(
+                        max(
+                            timing["memory_update_seconds"]
+                            - self._profile_descriptor_seconds,
+                            0.0,
+                        )
+                    ),
                     "decode_seconds": float(timing["decode_seconds"]),
                     "chunks": int(timing["chunks"]),
                 }

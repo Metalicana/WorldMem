@@ -403,6 +403,72 @@ logs/*.log                          # full command logs
 - `peak_torch_allocated_mib`: process-level PyTorch peak allocated memory.
 - `peak_torch_reserved_mib`: process-level PyTorch peak reserved/cached memory.
 
+For the final matched complete-retention versus KEEPSAKE resource evaluation,
+run both the released CPU-bank path and the analysis-only GPU-resident bank on
+the same GPU:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+STAMP=$(date +%F_%H%M)
+PROFILE_ROOT=/data/ab575577/worldmem/outputs/memory_policy/gpu_memory_profiles/final_keepsake_resource_$STAMP
+
+CUDA_VISIBLE_DEVICES=0 \
+GPU=0 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+PROFILE_ROOT="$PROFILE_ROOT" \
+FUTURE_SECONDS=60 \
+NUM_VIDEOS=1 \
+MINE_POLICIES=slam_covisibility \
+MINE_BUDGETS=32 \
+INCLUDE_UNBOUNDED=1 \
+MEMORY_BANK_DEVICES=cpu,gpu \
+SAMPLE_INTERVAL=1 \
+HOST_SAMPLE_INTERVAL=1 \
+LOG_VIDEO=false \
+SAVE_LOCAL_PER_BATCH=false \
+bash scripts/profile_worldmem_gpu_memory.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/final_keepsake_resource_$STAMP.log
+
+PROFILE_ROOT="$PROFILE_ROOT" \
+bash scripts/plot_worldmem_resource_profile.sh
+```
+
+This produces four matched runs: CPU-bank complete retention, CPU-bank
+KEEPSAKE B32, GPU-bank complete retention, and GPU-bank KEEPSAKE B32. The
+report under `$PROFILE_ROOT/resource_report` contains:
+
+```text
+figures/worldmem_archive_growth.{png,pdf}
+figures/worldmem_resource_summary.{png,pdf}
+tables/worldmem_archive_growth.csv
+tables/worldmem_resource_summary.{csv,tex}
+provenance.json
+```
+
+The profile root also contains `environment.json` with the exact PyTorch,
+CUDA, cuDNN, GPU, driver, git revision, and sampling configuration.
+
+The measurements have deliberately separate scopes:
+
+- Archive MiB is exact retained latent tensor payload and excludes Python,
+  pose, and index metadata.
+- Host memory is the peak summed RSS of the launched inference process tree,
+  sampled from Linux `/proc`.
+- CUDA memory is both whole-device `nvidia-smi` usage and process-level
+  PyTorch peak allocation/reservation.
+- Retrieval latency covers synchronized `_generate_condition_indices` calls;
+  the 60-second run supplies 600 timed queries.
+- Archive-update overhead includes initial bank construction and all online
+  retention updates. Descriptor extraction is timed separately and is also a
+  subset of the inclusive update total.
+- The CPU-bank path is the released execution mode. The GPU-bank path exists
+  to measure the resident-archive scaling curve; do not describe it as the
+  released default.
+
 Note: in the current validation/generation path, WorldMem keeps most generated latent history on CPU and moves only the sliding window plus retrieved reference frames to GPU. So peak GPU memory may be similar between unbounded and bounded policies; the unbounded-vs-budgeted difference can show up more strongly in candidate-bank size, CPU/RAM behavior, retrieval cost, and output quality. This profiling still gives the clean GPU-memory evidence.
 
 Observed CECSL CPU-bank GPU-memory profile for one 60s video on GPU 0, from `/data/ab575577/worldmem/outputs/memory_policy/gpu_memory_profiles/2026-07-17_134759/summary.csv` on 2026-07-17:
@@ -2936,3 +3002,82 @@ GT previews are exported when available but `gt_checked` remains false until a
 human visually checks them. Historical runs do not record the final source
 path after a dataset read retry, so provenance verifies the common requested
 trajectory under dataset seed 42 and records that legacy limitation explicitly.
+
+## KEEPSAKE Signal and Priority-Update Ablations
+
+These runs isolate the two terms in the released WorldMem KEEPSAKE retention
+score at the main operating point, B=32:
+
+- `pose_only`: geometry weight 1.0, latent-appearance weight 0.0.
+- `appearance_only`: geometry weight 0.0, latent-appearance weight 1.0.
+- `recompute`: the full 0.65/0.35 score, recomputed after every eviction.
+
+The existing `worldmem_slam_covisibility_b32_60s_n30` run is the full-signal,
+one-shot/frozen-priority control; use its first 15 videos. WorldMem updates its
+archive one generated frame at a time, so recomputing versus freezing can only
+change multi-item culls. In this setup that means the initial 600-to-32
+compression. The launcher performs exact iterative rescoring there and records
+the mode and weights in the access trace.
+
+Run one matched video from each new branch first on GPU 1:
+
+```bash
+cd ~/WorldMem
+conda activate worldmem
+mkdir -p /data/ab575577/worldmem/logs
+
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+START_VIDEO=1 \
+END_VIDEO=1 \
+TOTAL_VIDEOS=15 \
+bash scripts/run_worldmem_keepsake_signal_ablation.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/keepsake_signal_ablation_pilot_gpu1_$(date +%F_%H%M).log
+```
+
+After checking the three pilot videos, resume the round-robin sweep through all
+15 matched trajectories:
+
+```bash
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+START_VIDEO=1 \
+END_VIDEO=15 \
+TOTAL_VIDEOS=15 \
+bash scripts/run_worldmem_keepsake_signal_ablation.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/keepsake_signal_ablation_n15_gpu1_$(date +%F_%H%M).log
+```
+
+The launcher is resumable and cycles pose-only, appearance-only, and recompute
+once per trajectory. It does not regenerate the existing frozen control.
+
+Evaluate matched N=15 LPIPS, FVD, and rFID after generation finishes:
+
+```bash
+GPU=1 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/evaluate_worldmem_keepsake_signal_ablation.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/keepsake_signal_ablation_metrics_gpu1_$(date +%F_%H%M).log
+```
+
+Run VBench separately from its environment:
+
+```bash
+cd ~/WorldMem
+conda activate vbench
+export CUDA_VISIBLE_DEVICES=1
+
+RUNS="worldmem_slam_covisibility_b32_60s_n30 \
+worldmem_keepsake_pose_only_b32_60s_n15 \
+worldmem_keepsake_appearance_only_b32_60s_n15 \
+worldmem_keepsake_recompute_b32_60s_n15" \
+LIMIT=15 \
+OUTPUT_ROOT=/data/ab575577/worldmem/outputs/memory_policy/metrics/vbench_keepsake_signal_ablation_60s_n15 \
+WORLDMEM_REPO_ROOT=$HOME/WorldMem \
+WORLDMEM_STORAGE_ROOT=/data/ab575577/worldmem \
+bash scripts/run_worldmem_vbench.sh \
+  2>&1 | tee /data/ab575577/worldmem/logs/vbench_keepsake_signal_ablation_gpu1_$(date +%F_%H%M).log
+```
